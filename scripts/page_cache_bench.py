@@ -53,11 +53,12 @@ def mincore_residency(mm: mmap.mmap, file_size: int) -> float:
     """Check fraction of mmap'd pages resident in memory via mincore().
 
     Returns fraction in [0, 1].
+    Note: mm must be opened with ACCESS_COPY or ACCESS_WRITE for from_buffer.
     """
     page_size = os.sysconf("SC_PAGE_SIZE")
     n_pages = (file_size + page_size - 1) // page_size
 
-    # Get the mmap buffer address
+    # Get the mmap buffer address (requires writable buffer protocol)
     buf = (ctypes.c_char * file_size).from_buffer(mm)
     addr = ctypes.addressof(buf)
 
@@ -85,6 +86,7 @@ def mincore_region_residency(mm: mmap.mmap, offset: int, length: int) -> float:
     aligned_length = ((aligned_length + page_size - 1) // page_size) * page_size
     n_pages = aligned_length // page_size
 
+    # Requires writable buffer protocol (ACCESS_COPY or ACCESS_WRITE)
     buf = (ctypes.c_char * len(mm)).from_buffer(mm)
     addr = ctypes.addressof(buf) + aligned_offset
 
@@ -193,7 +195,7 @@ def run_cache_benchmark(
 
     if access_method == "mmap":
         fd = os.open(str(corpus_path), os.O_RDONLY)
-        mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        mm = mmap.mmap(fd, 0, access=mmap.ACCESS_COPY)
 
         if cache_policy == "MADV_SEQUENTIAL":
             mm.madvise(mmap.MADV_SEQUENTIAL)

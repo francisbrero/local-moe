@@ -206,6 +206,10 @@ def bench_scattered_reads(filepath: Path, chunk_size_bytes: int, file_size: int,
     n_chunks = file_size // chunk_size_bytes
     sub_chunk = chunk_size_bytes // scatter_count
 
+    if n_chunks < scatter_count:
+        print(f"  WARNING: File too small for scattered reads ({n_chunks} chunks < {scatter_count} scatter_count), skipping")
+        return []
+
     for _ in range(reps):
         fd = os.open(str(filepath), os.O_RDONLY)
         try:
@@ -324,9 +328,12 @@ def main():
         # 5. Scattered reads (simulating non-contiguous expert layout)
         print(f"  Scattered reads (3 sub-chunks per expert)...")
         runs = bench_scattered_reads(test_file, chunk_bytes, file_size, REPETITIONS)
-        summary = summarize_results(runs)
-        all_results[f"scattered_{chunk_mb}mb"] = {"runs": runs, "summary": summary}
-        print(f"    {summary['bandwidth_gbps_mean']:.2f} GB/s (std: {summary['bandwidth_gbps_std']:.2f})")
+        if runs:
+            summary = summarize_results(runs)
+            all_results[f"scattered_{chunk_mb}mb"] = {"runs": runs, "summary": summary}
+            print(f"    {summary['bandwidth_gbps_mean']:.2f} GB/s (std: {summary['bandwidth_gbps_std']:.2f})")
+        else:
+            all_results[f"scattered_{chunk_mb}mb"] = {"runs": [], "summary": {"bandwidth_gbps_mean": 0, "bandwidth_gbps_std": 0, "bandwidth_gbps_min": 0, "bandwidth_gbps_max": 0, "runs": 0}}
 
     # Cleanup test file
     test_file.unlink()

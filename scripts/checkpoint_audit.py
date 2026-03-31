@@ -206,11 +206,33 @@ def estimate_non_expert_size(moe_config: dict) -> dict:
 def audit_shard_layout(repo: str, index: dict | None) -> dict:
     """Analyze how expert tensors are distributed across safetensor shards."""
     if index is None:
-        return {"shards": 0, "layout": "unknown", "contiguous_experts": "unknown"}
+        return {
+            "total_shards": 0,
+            "expert_tensor_count": 0,
+            "non_expert_tensor_count": 0,
+            "expert_shards": 0,
+            "non_expert_shards": 0,
+            "expert_groups": 0,
+            "multi_shard_experts": 0,
+            "contiguous_experts": True,
+            "sample_expert_tensors": [],
+            "error": "no_index",
+        }
 
     weight_map = index.get("weight_map", {})
     if not weight_map:
-        return {"shards": 0, "layout": "no weight map"}
+        return {
+            "total_shards": 0,
+            "expert_tensor_count": 0,
+            "non_expert_tensor_count": 0,
+            "expert_shards": 0,
+            "non_expert_shards": 0,
+            "expert_groups": 0,
+            "multi_shard_experts": 0,
+            "contiguous_experts": True,
+            "sample_expert_tensors": [],
+            "error": "no_weight_map",
+        }
 
     # Count unique shards
     shards = set(weight_map.values())

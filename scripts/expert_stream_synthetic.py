@@ -144,12 +144,14 @@ def test_zero_copy(expert_file: Path, bytes_per_expert: int) -> dict:
     metal_samples = []
 
     for i in range(ZERO_COPY_ITERATIONS):
-        # Read expert bytes from mmap
+        # Read expert directly from mmap without intermediate bytes copy
         offset = (i % (len(mm) // bytes_per_expert)) * bytes_per_expert
-        expert_bytes = mm[offset : offset + bytes_per_expert]
+        expert_np = np.frombuffer(
+            mm, dtype=np.uint8, count=bytes_per_expert, offset=offset
+        )
 
-        # Wrap as MLX array
-        arr = mx.array(np.frombuffer(expert_bytes, dtype=np.uint8))
+        # Wrap as MLX array (this is the zero-copy path we're testing)
+        arr = mx.array(expert_np)
 
         # Dequant
         dequant = arr.astype(mx.float16) * (1.0 / 127.0)
