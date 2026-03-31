@@ -172,6 +172,39 @@ def get_model_revision(repo: str, revision: str | None = None) -> str:
     return dirs[0].name
 
 
+def estimate_model_size_gb(repo: str, revision: str | None = None) -> float:
+    """Estimate model weight size in GB by summing cached weight files.
+
+    Sums .safetensors and .bin files in the snapshot directory.
+    Falls back to 1.0 GB if no weight files found.
+    """
+    rev = get_model_revision(repo, revision)
+    snapshot = _repo_dir(repo) / "snapshots" / rev
+
+    total_bytes = 0
+    for ext in ("*.safetensors", "*.bin", "*.gguf"):
+        for f in snapshot.glob(ext):
+            # HF cache uses symlinks to blobs; resolve to get real size
+            total_bytes += f.resolve().stat().st_size
+
+    if total_bytes == 0:
+        return 1.0  # conservative fallback
+    return round(total_bytes / (1024**3), 2)
+
+
+def get_local_model_path(repo: str, revision: str | None = None) -> str:
+    """Return the local filesystem path for a cached model snapshot.
+
+    This is the path that should be passed to mlx_lm.load() to guarantee
+    offline-only operation. Raises FileNotFoundError if not cached.
+    """
+    rev = get_model_revision(repo, revision)
+    snapshot_dir = _repo_dir(repo) / "snapshots" / rev
+    if not snapshot_dir.exists():
+        raise FileNotFoundError(f"Snapshot directory not found: {snapshot_dir}")
+    return str(snapshot_dir)
+
+
 def get_model_config(repo: str, revision: str | None = None) -> dict:
     """Read config.json from local HF cache only. No network.
 

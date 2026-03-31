@@ -35,8 +35,10 @@ from prepare import (
     compute_perplexity,
     compute_ssd_read_gb,
     estimate_memory_gb,
+    estimate_model_size_gb,
     get_disk_io_snapshot,
     get_environment_info,
+    get_local_model_path,
     get_model_config,
     get_model_revision,
     get_peak_gpu_mb_peak,
@@ -211,8 +213,14 @@ def run():
         _abort("aborted_preflight", f"Cannot read model config: {e}", env, config, meta)
         return
 
+    # Use tier's approx_size_gb only when repo matches the tier default.
+    # When MODEL_REPO overrides, measure actual cached weight files to avoid
+    # underestimating memory for a larger model.
     tier_info = MODEL_TIERS.get(MODEL_TIER, {})
-    approx_size = tier_info.get("approx_size_gb", 1.0)
+    if MODEL_REPO is None and tier_info:
+        approx_size = tier_info["approx_size_gb"]
+    else:
+        approx_size = estimate_model_size_gb(repo, revision)
     estimate = estimate_memory_gb(approx_size, model_config, CONTEXT_LENGTH)
     print(f"Memory estimate: {estimate:.1f}GB")
 
@@ -233,8 +241,13 @@ def run():
     import mlx.core as mx
     import mlx_lm
 
+    # Resolve to local filesystem path to guarantee no network I/O.
+    # mlx_lm.load() with a repo ID would route through snapshot_download().
+    local_path = get_local_model_path(repo, revision)
+    print(f"Loading from: {local_path}")
+
     t_load_start = time.perf_counter()
-    model, tokenizer = mlx_lm.load(repo, revision=revision)
+    model, tokenizer = mlx_lm.load(local_path)
 
     if COMPILE_MODEL:
         model = mx.compile(model)
@@ -278,13 +291,13 @@ def run():
     # -----------------------------------------------------------------------
     print(f"--- Phase 2: Warm ({REPETITIONS} reps) ---")
     warm_runs = []
-    aborted = False
+    abort_status = None
     abort_reason = ""
 
     for i in range(REPETITIONS):
         # Time budget check
         if time.monotonic() - start_time > TIME_BUDGET_SECONDS:
-            aborted = True
+            abort_status = "aborted_timeout"
             abort_reason = f"Time budget exceeded ({TIME_BUDGET_SECONDS}s)"
             print(f"  Time budget exceeded after rep {i}")
             break
@@ -295,14 +308,14 @@ def run():
 
         # Memory check after each rep
         if not is_memory_safe():
-            aborted = True
+            abort_status = "aborted_memory"
             abort_reason = f"Memory unsafe after warm rep {i+1}"
             print(f"  Memory unsafe after rep {i+1}")
             break
 
     peak = {"rss_mb": round(get_peak_rss_mb(), 1), "gpu_mb": get_peak_gpu_mb_peak()}
 
-    if aborted:
+    if abort_status:
         # Non-truncated warm runs for stats
         valid_runs = [r for r in warm_runs if not r["truncated"]]
         warm = {
@@ -312,7 +325,7 @@ def run():
             "ttft": round(sum(r["ttft"] for r in valid_runs) / len(valid_runs), 4) if valid_runs else None,
         }
         _abort(
-            "aborted_memory", abort_reason,
+            abort_status, abort_reason,
             env, config, meta,
             cold=cold, warm=warm, peak=peak,
         )
@@ -349,13 +362,14 @@ def run():
         return
 
     perplexity_passages = {}
-    quality_aborted = False
+    quality_abort_status = None
+    quality_abort_reason = ""
 
     for name, text in PERPLEXITY_PASSAGES.items():
         # Time budget check
         if time.monotonic() - start_time > TIME_BUDGET_SECONDS:
-            quality_aborted = True
-            abort_reason = f"Time budget exceeded during quality ({name})"
+            quality_abort_status = "aborted_timeout"
+            quality_abort_reason = f"Time budget exceeded during quality ({name})"
             break
 
         ppl = compute_perplexity(model, tokenizer, text)
@@ -364,13 +378,13 @@ def run():
 
         # Memory check between passages
         if not is_memory_safe():
-            quality_aborted = True
-            abort_reason = f"Memory unsafe after quality passage '{name}'"
+            quality_abort_status = "aborted_memory"
+            quality_abort_reason = f"Memory unsafe after quality passage '{name}'"
             break
 
     peak = {"rss_mb": round(get_peak_rss_mb(), 1), "gpu_mb": get_peak_gpu_mb_peak()}
 
-    if quality_aborted:
+    if quality_abort_status:
         quality_partial = {
             "perplexity_passages": perplexity_passages,
             "perplexity_mean": (
@@ -380,7 +394,7 @@ def run():
             "cache_hit_rate": None,
         }
         _abort(
-            "aborted_memory", abort_reason,
+            quality_abort_status, quality_abort_reason,
             env, config, meta,
             cold=cold, warm=warm, peak=peak, quality=quality_partial,
         )
