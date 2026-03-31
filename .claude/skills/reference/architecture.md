@@ -21,8 +21,8 @@ local-moe/
 │   ├── benchmark.py       # Benchmarking harness
 │   └── ...
 ├── dev/
-│   ├── active/            # Current experiments (gitignored)
-│   ├── completed/         # Archived experiments (gitignored)
+│   ├── active/            # Current experiments
+│   ├── completed/         # Archived experiments
 │   └── templates/         # Experiment doc templates
 ├── models/                # Downloaded models (gitignored)
 └── .claude/

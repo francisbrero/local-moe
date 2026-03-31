@@ -30,8 +30,9 @@ Fill in `plan.md`:
 
 Always measure before changing anything:
 ```bash
-# Run baseline benchmark
-uv run python scripts/benchmark.py --config baseline.json
+# Run baseline benchmark (adjust command for your experiment)
+# e.g. uv run python scripts/benchmark.py --config baseline.json
+make bench
 ```
 
 Log to `experiments.jsonl`:

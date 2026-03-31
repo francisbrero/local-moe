@@ -18,10 +18,10 @@ Restructure `(nibble * scale + bias) * x` as `fma(nibble, scale*x, bias*x)` to u
 CPU-written buffers are immediately visible to GPU shaders. Use `MTLResourceStorageModeShared` for buffers that both CPU and GPU access. No explicit copy needed.
 
 ### Serial GPU/SSD Pipeline
-On Apple Silicon unified memory, concurrent GPU compute and SSD DMA reduces GPU throughput by up to 73%. Always serialize: SSD read → GPU compute → SSD read → GPU compute.
+On Apple Silicon unified memory, concurrent GPU compute and SSD DMA has been reported to reduce GPU throughput by up to 73% (observed on M2 Ultra; M4 behavior is unvalidated — see Agents.md open questions). Default to serialized: SSD read → GPU compute → SSD read → GPU compute, but benchmark both approaches on target hardware.
 
 ### Metal 4 Tensors
-Metal 4 introduces tensors as first-class MSL types. Declare tensor variables directly in shaders for native tensor operations.
+Metal 4 introduces tensors as first-class MSL types. Declare tensor variables directly in shaders for native tensor operations. Note: Metal 4 API is new and may have limited tooling support — verify deployment target compatibility.
 
 ## Kernel Conventions
 

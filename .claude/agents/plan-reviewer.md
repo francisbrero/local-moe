@@ -1,5 +1,6 @@
 ---
 name: plan-reviewer
+description: Reviews experiment plans using Codex as an external reviewer
 tools: [Read, Glob, Grep, Bash]
 model: sonnet
 ---
@@ -19,12 +20,13 @@ You will receive:
 1. **Gather context**:
    - Read the plan file at `PLAN_PATH` using the Read tool
    - Read `CLAUDE.md` for project conventions
-   - Run `gh issue view $ISSUE_NUMBER` to get issue details
+   - Run `gh issue view ISSUE_NUMBER` to get issue details (validate ISSUE_NUMBER is numeric first)
 
 2. **Invoke Codex for review**:
-   Run the following command:
-   ```
-   codex exec -s read-only -o /tmp/plan-review-output.txt "Review the plan at $PLAN_PATH for the local-moe project. This project runs LLM inference on a 16GB M4 MacBook Pro.
+   Write the review prompt to a temp file, then pipe it to codex exec:
+   ```bash
+   cat > /tmp/plan-review-prompt.txt << 'PROMPT'
+   Review the plan for the local-moe project. This project runs LLM inference on a 16GB M4 MacBook Pro.
 
    Review criteria:
    - Memory budget: Does the plan respect the ~10-11GB usable memory constraint?
@@ -36,19 +38,22 @@ You will receive:
 
    Return your review as JSON:
    {
-     \"material_findings\": true/false,
-     \"findings\": [
+     "material_findings": true/false,
+     "findings": [
        {
-         \"severity\": \"high|medium|low\",
-         \"category\": \"memory|benchmarks|docs|feasibility|scope|other\",
-         \"description\": \"what the issue is\",
-         \"suggestion\": \"how to fix it\"
+         "severity": "high|medium|low",
+         "category": "memory|benchmarks|docs|feasibility|scope|other",
+         "description": "what the issue is",
+         "suggestion": "how to fix it"
        }
      ],
-     \"summary\": \"one paragraph overall assessment\"
+     "summary": "one paragraph overall assessment"
    }
 
-   material_findings should be true if any finding has high or medium severity."
+   material_findings should be true if any finding has high or medium severity.
+   PROMPT
+
+   codex exec -s read-only -o /tmp/plan-review-output.txt - < /tmp/plan-review-prompt.txt
    ```
 
 3. **Parse the output**:

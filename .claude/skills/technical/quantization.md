@@ -15,7 +15,7 @@ alwaysApply: false
 Standard for consumer hardware. 70B model ≈ 40GB. Too large for 16GB.
 
 ### 2-bit (QuIP#, AQLM)
-Post-training quantization. 70B model ≈ 17GB. Tight fit on 16GB with KV cache.
+Post-training quantization. 70B model ≈ 17GB raw weights. Actual memory is higher due to embeddings, quantizer overhead, and KV cache — tight fit on 16GB.
 - QuIP#: Hadamard incoherence + lattice codebooks
 - AQLM: Additive quantization via learned codebooks
 
@@ -35,13 +35,13 @@ Compress KV cache to 3-4 bits with zero accuracy loss:
 
 ## Memory Budget (16GB M4)
 
-| Component | Budget |
-|-----------|--------|
-| OS + overhead | ~5GB |
-| Non-expert weights | 2-4GB |
-| Metal scratch buffers | ~200MB |
-| KV cache | 1-3GB (before compression) |
-| Expert cache | remainder |
+| Component | Budget | Notes |
+|-----------|--------|-------|
+| OS + overhead | ~5GB | |
+| Non-expert weights | 2-4GB | |
+| Metal scratch buffers | ~200MB | GPU memory (shared with system) |
+| KV cache | 1-3GB | Before TurboQuant compression |
+| Expert cache | remainder | Measure with gpu_memory_mb metric |
 
 ## Resources
 

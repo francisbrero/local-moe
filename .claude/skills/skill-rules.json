@@ -17,7 +17,7 @@
       "file": ".claude/skills/technical/quantization.md",
       "description": "Weight and KV cache quantization techniques",
       "promptTriggers": {
-        "keywords": ["quantiz", "quant", "gguf", "bitnet", "quip", "aqlm", "turboquant", "2-bit", "4-bit", "1-bit", "compression"],
+        "keywords": ["quantiz", "quant", "gguf", "bitnet", "quip", "aqlm", "turboquant", "2-bit", "4-bit", "1-bit", "weight compression"],
         "intentPatterns": ["quantiz.*model", "compress.*weight", "reduce.*memory", "bit.*weight"]
       }
     },
@@ -27,7 +27,7 @@
       "file": ".claude/skills/technical/moe-offloading.md",
       "description": "MoE expert offloading and SSD streaming",
       "promptTriggers": {
-        "keywords": ["expert", "offload", "moe", "mixture", "streaming", "ssd", "cache", "flash-moe", "hobbit", "page cache"],
+        "keywords": ["expert offload", "moe", "mixture of experts", "expert streaming", "ssd offload", "expert cache", "flash-moe", "hobbit", "page cache"],
         "intentPatterns": ["offload.*expert", "stream.*ssd", "expert.*cache", "moe.*inference"]
       }
     },
@@ -57,8 +57,8 @@
       "file": ".claude/skills/reference/architecture.md",
       "description": "Project architecture and structure overview",
       "promptTriggers": {
-        "keywords": ["architecture", "structure", "project layout", "where is", "how is organized"],
-        "intentPatterns": ["project.*structure", "where.*file", "how.*organized"]
+        "keywords": ["architecture", "project structure", "project layout", "how is organized"],
+        "intentPatterns": ["project.*structure", "project.*layout", "how.*organized"]
       }
     }
   }
