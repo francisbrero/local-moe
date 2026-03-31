@@ -98,11 +98,17 @@ def load_expert_from_memory(
     return dequant
 
 
-def expert_gemm(expert_weights: mx.array, input_tensor: mx.array) -> mx.array:
+def compute_matmul_dim(bytes_per_expert: int) -> int:
+    """Compute the largest square matrix dimension that fits in an expert's bytes."""
+    # After dequant from uint8 to float16, each byte becomes one float16 element
+    n_elements = bytes_per_expert
+    dim = int(n_elements**0.5)
+    return dim
+
+
+def expert_gemm(expert_weights: mx.array, input_tensor: mx.array, dim: int) -> mx.array:
     """Simulate expert FFN: simple matmul (not a real FFN, but measures compute cost)."""
-    # Reshape expert to a 2D matrix for matmul
-    n = input_tensor.shape[-1]
-    weight_2d = expert_weights[: n * n].reshape(n, n)
+    weight_2d = expert_weights[: dim * dim].reshape(dim, dim)
     result = input_tensor @ weight_2d
     mx.eval(result)
     return result
@@ -124,8 +130,8 @@ def test_zero_copy(expert_file: Path, bytes_per_expert: int) -> dict:
     fd = os.open(str(expert_file), os.O_RDONLY)
     mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
 
-    input_dim = min(2048, int(bytes_per_expert**0.5))
-    input_tensor = mx.random.normal((1, input_dim))
+    dim = compute_matmul_dim(bytes_per_expert)
+    input_tensor = mx.random.normal((1, dim))
     mx.eval(input_tensor)
 
     # Baseline measurements
@@ -157,13 +163,12 @@ def test_zero_copy(expert_file: Path, bytes_per_expert: int) -> dict:
         dequant = arr.astype(mx.float16) * (1.0 / 127.0)
 
         # Matmul
-        n = input_dim
-        weight_2d = dequant[:n * n].reshape(n, n)
+        weight_2d = dequant[: dim * dim].reshape(dim, dim)
         result = input_tensor @ weight_2d
         mx.eval(result)
 
-        # Discard
-        del arr, dequant, weight_2d, result
+        # Discard (must delete numpy view before mmap can close)
+        del arr, dequant, weight_2d, result, expert_np
 
         # Sample memory
         if i % 10 == 0:
@@ -238,8 +243,8 @@ def bench_in_memory_expert_gemm(
     k_active: int,
 ) -> dict:
     """Benchmark dequant+GEMM with experts fully in memory."""
-    input_dim = min(hidden_dim, 2048)
-    input_tensor = mx.random.normal((1, input_dim))
+    dim = compute_matmul_dim(len(expert_data[0]))
+    input_tensor = mx.random.normal((1, dim))
     mx.eval(input_tensor)
 
     n_experts = len(expert_data)
@@ -257,8 +262,7 @@ def bench_in_memory_expert_gemm(
             dequant = arr.astype(mx.float16) * (1.0 / 127.0)
 
             # GEMM
-            n = input_dim
-            weight_2d = dequant[:n * n].reshape(n, n)
+            weight_2d = dequant[: dim * dim].reshape(dim, dim)
             result = input_tensor @ weight_2d
             mx.eval(result)
 
@@ -290,8 +294,8 @@ def bench_streamed_expert_gemm(
     k_active: int,
 ) -> dict:
     """Benchmark dequant+GEMM with experts streamed from SSD."""
-    input_dim = min(hidden_dim, 2048)
-    input_tensor = mx.random.normal((1, input_dim))
+    dim = compute_matmul_dim(bytes_per_expert)
+    input_tensor = mx.random.normal((1, dim))
     mx.eval(input_tensor)
 
     fd = os.open(str(expert_file), os.O_RDONLY)
@@ -316,8 +320,7 @@ def bench_streamed_expert_gemm(
                 t_compute = time.perf_counter()
                 arr = mx.array(np.frombuffer(data, dtype=np.uint8))
                 dequant = arr.astype(mx.float16) * (1.0 / 127.0)
-                n = input_dim
-                weight_2d = dequant[:n * n].reshape(n, n)
+                weight_2d = dequant[: dim * dim].reshape(dim, dim)
                 result = input_tensor @ weight_2d
                 mx.eval(result)
                 compute_time = time.perf_counter() - t_compute
