@@ -22,15 +22,18 @@ __pycache__/
 *.pyc
 .venv/
 .python-version
+uv.lock
 
 # Node (for hooks)
 node_modules/
 
 # Claude hooks temp files
 .claude/hooks/.edit-log
+.claude/worktrees/
 
 # OS
 .DS_Store
 
 # Experiment data (large)
 *.jsonl
+!experiments.jsonl
