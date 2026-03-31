@@ -23,7 +23,7 @@ MoE models activate only K experts per layer per token (e.g., K=4 out of 64). St
 ### Mixed Precision Fallback (HOBBIT)
 - Store both full-precision (Q4) and low-precision (Q2) copies
 - Serve Q2 immediately on cache miss, Q4 when loaded
-- Never stall waiting for SSD — always have a fallback
+- Goal: avoid stalling on SSD reads by having a lower-quality fallback ready
 
 ### ML-Based Caching (FlashMoE paper)
 - Lightweight model predicting next-needed experts
@@ -31,7 +31,7 @@ MoE models activate only K experts per layer per token (e.g., K=4 out of 64). St
 - 51% better hit rates than LRU/LFU
 
 ### Serial Pipeline
-Critical: on Apple Silicon unified memory, do NOT overlap SSD reads with GPU compute. The shared memory controller causes 73% GPU throughput degradation when both are active.
+On Apple Silicon unified memory, overlapping SSD reads with GPU compute has been reported to cause up to 73% GPU throughput degradation (observed on M2 Ultra; M4 behavior is unvalidated — see Agents.md open questions). Default to serialized pipeline, but benchmark both approaches on target hardware.
 
 ```
 SSD read expert → GPU compute layer → SSD read expert → GPU compute layer

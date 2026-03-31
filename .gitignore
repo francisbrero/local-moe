@@ -1,9 +1,3 @@
-# Experiment docs (session-specific)
-dev/active/*
-!dev/active/.gitkeep
-dev/completed/*
-!dev/completed/.gitkeep
-
 # Models (too large for git)
 models/
 *.gguf
@@ -33,7 +27,3 @@ node_modules/
 
 # OS
 .DS_Store
-
-# Experiment data (large)
-*.jsonl
-!experiments.jsonl

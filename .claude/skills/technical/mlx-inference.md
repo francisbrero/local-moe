@@ -17,7 +17,7 @@ uv add mlx mlx-lm
 ## Key Techniques
 
 ### Mixed-Precision Quantization
-```python
+```bash
 # 4-bit body, 6-bit embeddings for better quality
 mlx_lm.convert --hf-path <model> --mlx-path <output> \
     -q --q-bits 4 --q-group-size 64

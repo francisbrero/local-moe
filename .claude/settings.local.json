@@ -1,0 +1,46 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh pr create:*)",
+      "Bash(git checkout:*)",
+      "Bash(git branch:*)",
+      "Bash(make build)",
+      "Bash(make test)",
+      "Bash(make bench)",
+      "Bash(uv run:*)",
+      "Bash(uv sync)",
+      "Bash(codex exec:*)",
+      "Bash(codex review:*)",
+      "Bash(git diff:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/file-edit-tracker.sh",
+            "statusMessage": "Tracking file changes..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/build-checker.sh",
+            "statusMessage": "Checking build and benchmarks..."
+          }
+        ]
+      }
+    ]
+  }
+}
