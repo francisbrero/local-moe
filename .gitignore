@@ -1,0 +1,36 @@
+# Experiment docs (session-specific)
+dev/active/*
+!dev/active/.gitkeep
+dev/completed/*
+!dev/completed/.gitkeep
+
+# Models (too large for git)
+models/
+*.gguf
+*.bin
+*.safetensors
+*.pth
+
+# Build artifacts
+build/
+*.o
+*.dylib
+*.metallib
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.python-version
+
+# Node (for hooks)
+node_modules/
+
+# Claude hooks temp files
+.claude/hooks/.edit-log
+
+# OS
+.DS_Store
+
+# Experiment data (large)
+*.jsonl

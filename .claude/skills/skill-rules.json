@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "skills": {
+    "metal-shaders": {
+      "type": "domain",
+      "priority": "high",
+      "file": ".claude/skills/technical/metal-shaders.md",
+      "description": "Metal compute shader patterns for LLM inference",
+      "promptTriggers": {
+        "keywords": ["metal", "shader", "kernel", "gpu", "compute", "fma", "dequant", "threadgroup", "msl"],
+        "intentPatterns": ["write.*metal", "metal.*kernel", "gpu.*shader", "fused.*kernel"]
+      }
+    },
+    "quantization": {
+      "type": "domain",
+      "priority": "high",
+      "file": ".claude/skills/technical/quantization.md",
+      "description": "Weight and KV cache quantization techniques",
+      "promptTriggers": {
+        "keywords": ["quantiz", "quant", "gguf", "bitnet", "quip", "aqlm", "turboquant", "2-bit", "4-bit", "1-bit", "compression"],
+        "intentPatterns": ["quantiz.*model", "compress.*weight", "reduce.*memory", "bit.*weight"]
+      }
+    },
+    "moe-offloading": {
+      "type": "domain",
+      "priority": "high",
+      "file": ".claude/skills/technical/moe-offloading.md",
+      "description": "MoE expert offloading and SSD streaming",
+      "promptTriggers": {
+        "keywords": ["expert", "offload", "moe", "mixture", "streaming", "ssd", "cache", "flash-moe", "hobbit", "page cache"],
+        "intentPatterns": ["offload.*expert", "stream.*ssd", "expert.*cache", "moe.*inference"]
+      }
+    },
+    "mlx-inference": {
+      "type": "domain",
+      "priority": "medium",
+      "file": ".claude/skills/technical/mlx-inference.md",
+      "description": "MLX framework for Apple Silicon inference",
+      "promptTriggers": {
+        "keywords": ["mlx", "apple", "mx.compile", "mx.fast", "mlx-lm"],
+        "intentPatterns": ["mlx.*model", "run.*mlx", "apple.*framework"]
+      }
+    },
+    "new-experiment": {
+      "type": "runbook",
+      "priority": "medium",
+      "file": ".claude/skills/runbooks/new-experiment.md",
+      "description": "How to set up and run a new experiment",
+      "promptTriggers": {
+        "keywords": ["experiment", "benchmark", "baseline", "measure", "test approach"],
+        "intentPatterns": ["new.*experiment", "set up.*experiment", "run.*benchmark", "start.*research"]
+      }
+    },
+    "architecture": {
+      "type": "reference",
+      "priority": "low",
+      "file": ".claude/skills/reference/architecture.md",
+      "description": "Project architecture and structure overview",
+      "promptTriggers": {
+        "keywords": ["architecture", "structure", "project layout", "where is", "how is organized"],
+        "intentPatterns": ["project.*structure", "where.*file", "how.*organized"]
+      }
+    }
+  }
+}
