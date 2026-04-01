@@ -58,7 +58,38 @@ Plan drafted. Depends on H0 (SSD streaming, validated) and H5 (Layer LOD, valida
 ### Phase 0 Verdict: PASS
 Multiple viable configurations found. Proceeding with **8+8 Q4 / 64 Q2** as primary target (best quality) and **3+5 Q4 / 72 Q2** as fallback (more cache headroom).
 
+## Phase 1b Results: Loader Strategy Selection
+
+### MLX Zero-Copy: CONFIRMED BROKEN
+- RSS grows ~65 MB (2× weight size) then stabilizes via GC
+- After 2 warmup cycles, steady-state RSS delta ≈ 0 MB
+
+### Key Discovery: MLX GC Makes Streaming Viable
+Despite MLX copying internally, the GC reclaims old tensor memory within 2 cycles.
+Steady-state behavior: RSS and Metal memory stay flat after warmup.
+
+### pread Staging Buffer: VALIDATED
+- Steady-state bandwidth: 6.2 GB/s (warm), first load 4.5 GB/s (cold)
+- Per-block latency (262 MB): 41 ms steady-state
+- RSS flat in steady state: max delta 3.2 MB
+
+### End-to-End Inference: VALIDATED
+- Load-swap-forward cycle works with zero logit diff (exact match)
+- RSS flat after 2 warmup cycles: max steady delta 3.4 MB
+- Metal memory flat: +11.6 MB growth (within ±5%)
+
+### mlock/madvise: ALL WORK
+- mlock: unlimited on this machine
+- MADV_WILLNEED, MADV_DONTNEED, MADV_FREE: all succeed
+
+### Loader Selected: mx.array() swap with GC
+No C extension needed! The MLX path works because:
+1. `mx.array(numpy_data)` creates new tensors
+2. Old tensors are GC'd when replaced
+3. After 2 warmup cycles, RSS is stable
+4. Logits match exactly
+
 ## Next Steps
 
-- Phase 1b: Confirm MLX copy blocker, build C/pread staging buffer prototype
-- Phase 1: Layer streaming prototype on 7B with synthetic pressure at 9.13 GB cache budget
+- Phase 1: Layer streaming prototype on 7B with synthetic pressure
+- Use Phase 0 recommended config: 8+8 Q4 / 64 Q2 (9.13 GB cache budget)
