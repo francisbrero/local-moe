@@ -2,7 +2,7 @@
 
 **Issue**: #25
 **Branch**: `experiment/layer-lod`
-**Status**: Phases 0-3 complete
+**Status**: Complete — ready for PR
 
 ## Current State
 
@@ -66,8 +66,11 @@ Compared 7 allocation strategies:
 
 ## Review Stats
 - Plan review rounds: 4
-- Total findings addressed: 13 (5 high, 6 medium, 2 low)
-- Code review rounds: TBD
+- Plan findings addressed: 13 (5 high, 6 medium, 2 low)
+- Code review rounds: 2
+- Code review round 1 findings: 3 fixed (biases guard, cache=None, remove eval barriers)
+- Code review round 2 findings: 5 fixed (memory accounting, eval barrier, model return type, U-shape threshold, docstring)
+- Total code findings addressed: 8
 
 ## Practical Recommendations
 1. **Use `optiq convert` for any MLX model** — automates per-layer sensitivity + optimization
