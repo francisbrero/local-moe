@@ -21,11 +21,8 @@ from experiment_utils import (
 from prepare import (
     BENCH_PROMPT,
     MODEL_TIERS,
-    PERPLEXITY_PASSAGES,
-    compute_perplexity,
     get_local_model_path,
     get_model_config,
-    get_peak_gpu_mb,
     get_peak_gpu_mb_peak,
     is_model_cached,
     reset_peak_memory,
@@ -85,16 +82,6 @@ def test_builtin_kv_quant(tier: str = "S", kv_bits: int | None = None):
     if peak_gpu is not None:
         print(f"  Peak GPU memory: {peak_gpu:.0f} MB")
 
-    # Perplexity via single forward pass (does NOT exercise quantized KV cache).
-    # This measures model quality independent of KV cache path.
-    # The generation output above DOES exercise the quantized KV cache.
-    ppl_results = {}
-    for name, text in PERPLEXITY_PASSAGES.items():
-        ppl = compute_perplexity(model, tokenizer, text)
-        ppl_results[name] = ppl
-    avg_ppl = sum(ppl_results.values()) / len(ppl_results)
-    print(f"  Forward-pass perplexity: {avg_ppl:.2f}")
-
     # Generation quality: generate a deterministic response and capture it
     # for cross-config comparison. This exercises the KV cache path.
     quality_prompt = "List the first 10 prime numbers and explain why 1 is not prime."
@@ -114,8 +101,6 @@ def test_builtin_kv_quant(tier: str = "S", kv_bits: int | None = None):
         "tokens_generated": n_tokens,
         "elapsed_s": round(elapsed, 3),
         "tok_s": round(tok_s, 1),
-        "forward_pass_perplexity": ppl_results,
-        "avg_forward_pass_ppl": round(avg_ppl, 2),
         "quality_response": quality_response,
         "model_config": model_config,
     }
@@ -229,10 +214,10 @@ def main():
         # Summary for this tier
         if tier_results:
             print(f"\n  === {tier} Summary ===")
-            print(f"  {'Config':>10} {'tok/s':>8} {'RSS Δ MB':>10} {'Fwd PPL':>10}")
-            print(f"  {'-'*40}")
+            print(f"  {'Config':>10} {'tok/s':>8} {'RSS Δ MB':>10}")
+            print(f"  {'-'*30}")
             for label, r in tier_results.items():
-                print(f"  {label:>10} {r['tok_s']:>8.1f} {r['rss_delta_mb']:>10.1f} {r['avg_forward_pass_ppl']:>10.2f}")
+                print(f"  {label:>10} {r['tok_s']:>8.1f} {r['rss_delta_mb']:>10.1f}")
 
             # Compare generated text between FP16 and kv4 (exercises quantized KV cache)
             if "fp16" in tier_results and "kv4" in tier_results:

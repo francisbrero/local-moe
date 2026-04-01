@@ -1,7 +1,14 @@
 """Compare TurboQuant (rotation + Lloyd-Max) vs MLX-LM built-in (group quantization).
 
-Measures attention fidelity (cosine similarity), compression ratio, and quantization
-overhead for both approaches on the same synthetic data.
+Measures attention fidelity (cosine similarity) and compression ratio for both
+approaches on the same synthetic data.
+
+NOTE: The built-in path simulates MLX's group quantization (mx.quantize/dequantize)
+on synthetic tensors. This measures quantization fidelity but not the actual
+QuantizedKVCache runtime path used in mlx_lm.generate(). For end-to-end
+performance with the real QuantizedKVCache, see test_existing.py.
+Latency numbers here reflect Python-level quantize/dequantize overhead, not the
+optimized Metal kernel path used in production inference.
 """
 
 import sys
@@ -52,7 +59,12 @@ def reference_attention(queries, keys, values, mask=None):
 
 
 def builtin_quantize_kv(keys, values, bits=4, group_size=64):
-    """Use MLX's built-in mx.quantize for group quantization."""
+    """Simulate MLX's group quantization on KV tensors.
+
+    NOTE: This uses mx.quantize/dequantize directly, not the QuantizedKVCache
+    class used by mlx_lm.generate(). The fidelity comparison is valid (same
+    quantization algorithm) but latency numbers don't reflect the optimized path.
+    """
     batch, n_heads, seq_len, head_dim = keys.shape
 
     # MLX quantize works on 2D arrays, reshape for it
@@ -161,7 +173,7 @@ def compare_methods(
 
 # Model configs
 MODEL_CONFIGS = {
-    "S": {"name": "Qwen2.5-0.5B", "n_kv_heads": 2, "head_dim": 64, "n_q_heads": 12, "n_layers": 24},
+    "S": {"name": "Qwen2.5-0.5B", "n_kv_heads": 2, "head_dim": 64, "n_q_heads": 14, "n_layers": 24},
     "M": {"name": "Qwen2.5-3B", "n_kv_heads": 2, "head_dim": 128, "n_q_heads": 16, "n_layers": 36},
     "XL": {"name": "Qwen2.5-14B", "n_kv_heads": 4, "head_dim": 128, "n_q_heads": 40, "n_layers": 48},
 }
@@ -188,10 +200,11 @@ def main():
                 bi = results["builtin"]
 
                 print(f"\n  {bits}-bit, seq_len={seq_len}:")
-                print(f"    {'Method':>14} {'Cosine':>10} {'Ratio':>8} {'Quant ms':>10} {'Attn ms':>10}")
-                print(f"    {'-'*50}")
-                print(f"    {'TurboQuant':>14} {tq['cosine']:>10.6f} {tq['ratio']:>8.2f}x {tq['quant_ms']:>10.1f} {tq['attn_ms']:>10.1f}")
-                print(f"    {'Built-in':>14} {bi['cosine']:>10.6f} {bi['ratio']:>8.2f}x {bi['quant_ms']:>10.1f} {bi['attn_ms']:>10.1f}")
+                print(f"    {'Method':>14} {'Cosine':>10} {'Ratio':>8}")
+                print(f"    {'-'*34}")
+                print(f"    {'TurboQuant':>14} {tq['cosine']:>10.6f} {tq['ratio']:>8.2f}x")
+                print(f"    {'Built-in*':>14} {bi['cosine']:>10.6f} {bi['ratio']:>8.2f}x")
+                print(f"    (* Built-in simulated via mx.quantize, not QuantizedKVCache runtime)")
 
                 winner = "TurboQuant" if tq["cosine"] > bi["cosine"] else "Built-in"
                 delta = abs(tq["cosine"] - bi["cosine"])
