@@ -82,5 +82,5 @@ For the 16GB M4 target:
 ## Review Stats
 
 - Plan review rounds: 7 (18+ findings addressed)
-- Code review rounds: TBD
-- Total findings addressed: TBD
+- Code review rounds: 3 (6 findings addressed: 3 high in round 1, 2 high + 1 medium in round 2, 0 new in round 3)
+- Total findings addressed: 24+
