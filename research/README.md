@@ -28,6 +28,7 @@ Each hypothesis draws an analogy from another field of computer science where si
 | H4  | [Low-rank base + sparse SSD corrections](./h4-lowrank-corrections.md) | Compressed sensing             | SVD-LLM (1.6x), HASSLE-free, CALDERA (<2.5bpw SOTA), Hypura (Apple Silicon)               | Medium — decomposition solved, system gap                      |
 | H5  | [Layer LOD — variable precision by depth](./h5-layer-lod.md)          | Game engine LOD                | U-shape confirmed, mlx-optiq (2.3x accuracy), llama.cpp regex quant, CoopQ                | **Highest — immediately actionable with existing tools**       |
 | H6  | [Activation sparsity prediction](./h6-activation-sparsity.md)         | Frustum culling                | PowerInfer (27.8x), TEAL (1.5-1.8x, training-free), TurboSparse (90% sparsity)            | **High — TEAL requires zero training, CMoE converts in 5 min** |
+| H7  | [KV cache compression](./h7-kv-cache-compression.md)                  | Video codec lossy compression  | TurboQuant (Google, ICLR 2026), MLX-LM built-in QuantizedKVCache                           | **Complete — built-in `kv_bits=4` works perfectly, zero quality loss** |
 
 
 ## How to Use This
