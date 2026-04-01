@@ -2,11 +2,11 @@
 
 **Issue**: #28
 **Branch**: `experiment/ssd-layer-lod`
-**Status**: Phase 1 complete — proceeding to Phase 2
+**Status**: Phases 0-2b complete. Phase 3 blocked on disk space (72B model requires 38 GB, only 13 GB free).
 
 ## Current State
 
-Phases 0, 1, 1b complete. Layer streaming prototype validated on 7B. Proceeding to scheduler optimization.
+Phases 0, 1, 1b, 2, 2b complete. Layer streaming architecture validated on 7B. Double-buffer scheduler selected. Synthetic 72B benchmark shows 0.25 tok/s cold-read floor with no thrashing. Phase 3 (actual 72B) blocked on disk space.
 
 ## Key Findings from Prior Experiments
 
@@ -170,6 +170,14 @@ The p95<50ms gate was designed for per-block latency with cache hits. In this te
 
 ## Next Steps
 
-- Phase 3: 72B integration test with actual model
-- Use double-buffer scheduler
-- Expected tok/s: 0.25-0.6 (cold-to-warm cache range)
+- Phase 3: 72B integration test (BLOCKED — need 38 GB free disk, currently 13 GB)
+  - Free /tmp synthetic blocks (16 GB) + other cleanup to reach ~35 GB
+  - Download mlx-community/Qwen2.5-72B-Instruct-4bit (38 GB)
+  - Use double-buffer scheduler
+  - Expected tok/s: 0.25-0.6 (cold-to-warm cache range)
+
+## Review Stats
+
+- Plan review rounds: 8 (22 findings addressed)
+- Code review rounds: 3 (2 medium + 4 low findings fixed in round 2; round 3 findings out-of-scope)
+- Total findings addressed: 28
