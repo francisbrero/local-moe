@@ -53,7 +53,9 @@ def compute_perplexity(model, tokenizer, texts: list[str], max_len: int = 512) -
 
         # Pass cache=None explicitly to ensure the model handles position
         # encoding and masking correctly (mlx-lm models accept cache kwarg)
-        logits = model(input_ids, cache=None)
+        out = model(input_ids, cache=None)
+        # Handle models that return (logits, cache) tuples
+        logits = out[0] if isinstance(out, tuple) else out
         logits = logits[0]  # (1, seq_len, vocab_size) → (seq_len, vocab_size)
 
         # Cross-entropy loss
@@ -302,6 +304,10 @@ def profile_layer_sensitivity(
                 if orig:
                     originals[name] = orig
 
+            # Materialize re-quantized weights before evaluation to prevent
+            # the lazy graph from referencing stale tensors during restore
+            mx.eval(model.parameters())
+
             # Measure perplexity
             t0 = time.time()
             ppl = compute_perplexity(model, tokenizer, texts, max_len)
@@ -382,14 +388,15 @@ def profile_layer_sensitivity(
         print(f"  Last 20% avg Δ:   {avg_last:+.4f}")
 
         # U-shape test: edges should be >2x middle
+        # Require avg_middle > 0.01 to avoid spurious ratios from near-zero denominators
         edge_avg = (avg_first + avg_last) / 2
-        if avg_middle > 0:
+        if avg_middle > 0.01:
             ratio = edge_avg / avg_middle
             u_shape = ratio > 2.0
             print(f"  Edge/middle ratio: {ratio:.2f}x — "
                   f"{'✓ U-shape CONFIRMED' if u_shape else '✗ U-shape NOT confirmed'}")
         else:
-            print(f"  Middle Δ ≤ 0 — cannot compute ratio")
+            print(f"  Middle Δ ≤ 0.01 — too small for reliable ratio")
 
         # Most/least sensitive blocks
         sorted_by_delta = sorted(bit_results, key=lambda r: r["ppl_delta"], reverse=True)

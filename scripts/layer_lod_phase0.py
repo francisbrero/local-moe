@@ -404,9 +404,12 @@ def run_phase_0c():
     else:
         print(f"  Checkpoint size on disk: {checkpoint_bytes / (1024**3):.2f} GB")
 
-    # Non-model overhead = peak process memory - deterministic model bytes
-    process_memory_mb = rss_after
-    non_model_overhead_mb = process_memory_mb - (checkpoint_bytes / (1024**2))
+    # Non-model overhead = total memory consumed minus checkpoint bytes.
+    # On Apple Silicon with MLX, weights live in Metal/unified memory (not RSS),
+    # so we use the system available-memory delta as the proxy for total consumption.
+    total_consumed_mb = (available_before - available_after) * 1024
+    non_model_overhead_mb = total_consumed_mb - (checkpoint_bytes / (1024**2))
+    print(f"  Total memory consumed: {total_consumed_mb:.0f} MB (from available delta)")
     print(f"  Non-model overhead: {non_model_overhead_mb:.0f} MB ({non_model_overhead_mb / 1024:.2f} GB)")
 
     # Run a quick generation to confirm model works

@@ -76,8 +76,10 @@ def make_sensitivity_allocation(
 ) -> dict[int, int]:
     """Greedy knapsack: assign bits based on sensitivity data from Phase 1.
 
-    Uses Q2 sensitivity deltas to rank blocks, then upgrades from Q2 to Q4
-    starting with the most sensitive until the bit budget is exhausted.
+    Uses Q2 sensitivity deltas to rank blocks (largest positive delta = most
+    sensitive). Upgrades from Q2 to Q4 starting with the most sensitive until
+    the bit budget is exhausted. Blocks with negative deltas (those that
+    actually improve at Q2) naturally stay at Q2 since they sort last.
     """
     # Sort by sensitivity (highest delta first)
     sorted_blocks = sorted(sensitivity_data, key=lambda x: x["ppl_delta"], reverse=True)
