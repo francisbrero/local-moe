@@ -34,7 +34,11 @@ from scripts.experiment_utils import get_environment_info, log_experiment
 
 
 def compute_perplexity(model, tokenizer, texts: list[str], max_len: int = 512) -> float:
-    """Compute perplexity on a list of text samples using MLX."""
+    """Compute perplexity on a list of text samples using MLX.
+
+    Uses model.__call__ with cache=None to ensure correct forward pass
+    (handles position IDs, masks, etc. internally via mlx-lm model code).
+    """
     total_loss = 0.0
     total_tokens = 0
 
@@ -47,8 +51,10 @@ def compute_perplexity(model, tokenizer, texts: list[str], max_len: int = 512) -
         input_ids = mx.array(tokens[:-1])[None, :]  # (1, seq_len)
         target_ids = mx.array(tokens[1:])  # (seq_len,)
 
-        logits = model(input_ids)  # (1, seq_len, vocab_size)
-        logits = logits[0]  # (seq_len, vocab_size)
+        # Pass cache=None explicitly to ensure the model handles position
+        # encoding and masking correctly (mlx-lm models accept cache kwarg)
+        logits = model(input_ids, cache=None)
+        logits = logits[0]  # (1, seq_len, vocab_size) → (seq_len, vocab_size)
 
         # Cross-entropy loss
         log_probs = nn.losses.cross_entropy(logits, target_ids, reduction="sum")
@@ -146,13 +152,13 @@ def requantize_layer(model, layer_name: str, target_bits: int, group_size: int =
         module.weight, module.scales, module.biases,
         module.group_size, module.bits,
     )
-    mx.eval(weight_fp)
 
     # Re-quantize at target bits
+    # No mx.eval() here — let MLX batch the computation lazily.
+    # The caller should eval after all layers in a block are re-quantized.
     new_weight, new_scales, new_biases = mx.quantize(
         weight_fp, group_size=group_size, bits=target_bits
     )
-    mx.eval(new_weight, new_scales, new_biases)
 
     # Replace weights in-place
     module.weight = new_weight
@@ -177,7 +183,8 @@ def restore_layer(model, layer_name: str, original: dict):
 
     module.weight = original["weight"]
     module.scales = original["scales"]
-    module.biases = original["biases"]
+    if original["biases"] is not None:
+        module.biases = original["biases"]
     module.bits = original["bits"]
     module.group_size = original["group_size"]
 
