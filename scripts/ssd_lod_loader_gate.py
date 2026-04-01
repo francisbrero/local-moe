@@ -161,6 +161,8 @@ def test_pread_staging_buffer(block_size_mb: float = 262.0) -> dict:
             bytes_read = 0
             while bytes_read < block_size:
                 chunk = os.pread(fd, min(block_size - bytes_read, 4 * 1024 * 1024), bytes_read)
+                if not chunk:
+                    raise IOError(f"pread returned 0 bytes at offset {bytes_read}")
                 staging_buffer[bytes_read:bytes_read + len(chunk)] = chunk
                 bytes_read += len(chunk)
 
@@ -261,7 +263,7 @@ def test_inference_integration(model, tokenizer, n_cycles: int = 10) -> dict:
     mx.eval(baseline_logits)
 
     rss_before = get_rss_mb()
-    metal_before = mx.get_peak_memory() / (1024 * 1024) if hasattr(mx.metal, "get_peak_memory") else 0
+    metal_before = mx.get_peak_memory() / (1024 * 1024) if hasattr(mx, "get_peak_memory") else 0
 
     print(f"  RSS before cycles: {rss_before:.1f} MB")
     print(f"  Metal peak before: {metal_before:.1f} MB")
@@ -301,7 +303,7 @@ def test_inference_integration(model, tokenizer, n_cycles: int = 10) -> dict:
         print(f"  Cycle {i+1}: RSS Δ{delta:+.1f} MB, logit diff={diff:.6f}, match={'YES' if diff < 1e-3 else 'NO'}")
 
     rss_after = get_rss_mb()
-    metal_after = mx.get_peak_memory() / (1024 * 1024) if hasattr(mx.metal, "get_peak_memory") else 0
+    metal_after = mx.get_peak_memory() / (1024 * 1024) if hasattr(mx, "get_peak_memory") else 0
     total_rss_growth = rss_after - rss_before
     metal_growth = metal_after - metal_before
 

@@ -232,8 +232,7 @@ def run_streaming_benchmark(
             # Normal forward pass (baseline)
             logits = model(input_ids, cache=None)
 
-        next_token = mx.argmax(logits[0, -1, :]).item()
-        mx.eval(logits)
+        next_token = mx.argmax(logits[0, -1, :]).item()  # .item() forces eval
         tokens.append(next_token)
 
         tok_ms = (time.perf_counter() - t_tok_start) * 1000

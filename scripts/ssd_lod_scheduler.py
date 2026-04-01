@@ -128,11 +128,12 @@ def serial_forward(model, input_ids, blocks, streaming_indices, save_dir, metric
     return model.lm_head(h)
 
 
-def double_buffer_forward(model, input_ids, blocks, streaming_indices, save_dir, metrics):
+def double_buffer_forward(model, input_ids, blocks, streaming_indices, save_dir, metrics, executor):
     """Double-buffer strategy: prefetch next block while computing current.
 
     Uses a background thread to load block N+1's weights from disk
-    while the GPU processes block N.
+    while the GPU processes block N. The executor should be created once
+    outside the token loop and reused across calls.
     """
     inner = get_inner_model(model)
     h = inner.embed_tokens(input_ids)
@@ -147,8 +148,6 @@ def double_buffer_forward(model, input_ids, blocks, streaming_indices, save_dir,
         next_stream[stream_order[j]] = stream_order[j + 1]
 
     # Prefetch state
-    prefetched = {}  # block_idx -> weights_dict (loaded by background thread)
-    executor = ThreadPoolExecutor(max_workers=1)
     pending_future = None
     pending_idx = None
 
@@ -168,9 +167,6 @@ def double_buffer_forward(model, input_ids, blocks, streaming_indices, save_dir,
                 metrics["wait_ms"].append(wait_ms)
                 pending_future = None
                 pending_idx = None
-            elif i in prefetched:
-                weights = prefetched.pop(i)
-                metrics["wait_ms"].append(0.0)
             else:
                 # Fallback: no prefetch available, load synchronously
                 t0 = time.perf_counter()
@@ -195,8 +191,6 @@ def double_buffer_forward(model, input_ids, blocks, streaming_indices, save_dir,
 
             mx.eval(h)
             evict_block(blocks[i])
-
-    executor.shutdown(wait=False)
 
     h = inner.norm(h)
     if hasattr(model, "args") and model.args.tie_word_embeddings:
@@ -236,17 +230,20 @@ def run_strategy_benchmark(
     per_token_ms = []
     all_metrics = {"load_ms": [], "wait_ms": []}
 
-    forward_fn = serial_forward if strategy == "serial" else double_buffer_forward
+    # Create executor once for double-buffer (avoids per-token thread creation overhead)
+    executor = ThreadPoolExecutor(max_workers=1) if strategy == "double-buf" else None
 
     for tok_i in range(n_tokens):
         t0 = time.perf_counter()
         input_ids = mx.array([tokens[-1:]])
 
         token_metrics = {"load_ms": [], "wait_ms": []}
-        logits = forward_fn(model, input_ids, blocks, streaming_indices, save_dir, token_metrics)
+        if strategy == "serial":
+            logits = serial_forward(model, input_ids, blocks, streaming_indices, save_dir, token_metrics)
+        else:
+            logits = double_buffer_forward(model, input_ids, blocks, streaming_indices, save_dir, token_metrics, executor)
 
-        next_token = mx.argmax(logits[0, -1, :]).item()
-        mx.eval(logits)
+        next_token = mx.argmax(logits[0, -1, :]).item()  # .item() forces eval
         tokens.append(next_token)
 
         tok_ms = (time.perf_counter() - t0) * 1000
@@ -259,6 +256,9 @@ def run_strategy_benchmark(
             total_load = sum(token_metrics["load_ms"])
             total_wait = sum(token_metrics["wait_ms"]) if token_metrics["wait_ms"] else 0
             print(f"    Token {tok_i}: {tok_ms:.0f} ms (load={total_load:.0f} ms, wait={total_wait:.0f} ms), RSS={rss:.0f} MB")
+
+    if executor is not None:
+        executor.shutdown(wait=True)
 
     vm_after = get_vm_stat()
     rss_after = get_rss_mb()
@@ -350,8 +350,7 @@ def main():
         t0 = time.perf_counter()
         input_ids = mx.array([tokens[-1:]])
         logits = model(input_ids, cache=None)
-        next_token = mx.argmax(logits[0, -1, :]).item()
-        mx.eval(logits)
+        next_token = mx.argmax(logits[0, -1, :]).item()  # .item() forces eval
         tokens.append(next_token)
         baseline_times.append((time.perf_counter() - t0) * 1000)
 

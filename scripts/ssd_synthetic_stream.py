@@ -64,6 +64,8 @@ def read_block_pread(block_idx: int, save_dir: Path, buf: bytearray) -> float:
         while offset < total:
             chunk = min(total - offset, 64 * 1024 * 1024)  # 64 MB per pread call
             data = os.pread(fd, chunk, offset)
+            if not data:
+                raise IOError(f"pread returned 0 bytes at offset {offset}")
             buf[offset:offset + len(data)] = data
             offset += len(data)
         elapsed_ms = (time.perf_counter() - t0) * 1000
