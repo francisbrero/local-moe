@@ -101,7 +101,7 @@ def get_codebook(bits: int) -> tuple[mx.array, mx.array]:
     )
 
 
-def quantize_scalar(x: mx.array, bits: int) -> tuple[mx.array, mx.array, mx.array]:
+def quantize_scalar(x: mx.array, bits: int) -> tuple[mx.array, mx.array]:
     """Quantize a float array using Lloyd-Max optimal quantizer.
 
     Args:
@@ -109,23 +109,47 @@ def quantize_scalar(x: mx.array, bits: int) -> tuple[mx.array, mx.array, mx.arra
         bits: Number of bits per element (2, 3, 4, 6, 8).
 
     Returns:
-        (indices, norms, codebook_centroids):
+        (indices, codebook_centroids):
         - indices: uint8/uint16 array of quantization indices, same shape as x
-        - norms: per-vector L2 norms (shape depends on caller's grouping)
         - codebook_centroids: the centroids array for dequantization
     """
     boundaries, centroids = get_codebook(bits)
 
-    # Find which bin each value falls into
-    # boundaries[1:-1] are the finite decision boundaries
+    # Use boundary-based bin assignment: find which interval each value falls into.
+    # boundaries[1:-1] are the finite decision boundaries between centroids.
     finite_bounds = boundaries[1:-1]  # shape: (2^bits - 1,)
 
-    # Nearest-centroid assignment: find the centroid closest to each value
-    # This is equivalent to searchsorted on boundaries but works in MLX
-    # Expand dims for broadcasting: x[..., None] vs centroids[None, ...]
-    x_expanded = x[..., None]  # (..., n_levels)
-    dists = mx.abs(x_expanded - centroids)  # broadcast: (..., n_levels)
-    indices = mx.argmin(dists, axis=-1)
+    # For each value, count how many boundaries it exceeds.
+    # This is equivalent to searchsorted and is O(n * k) but memory-efficient
+    # since we don't materialize the full (n, 2^bits) distance tensor.
+    # For bits <= 4, the broadcast is small enough. For bits > 4, we chunk.
+    n_levels = 1 << bits
+
+    if n_levels <= 16:
+        # Small codebook: direct broadcast is fine (max 15 comparisons per element)
+        # Each comparison produces a bool array same size as x, not (x, n_levels)
+        indices = mx.zeros(x.shape, dtype=mx.int32)
+        for i in range(n_levels - 1):
+            indices = indices + (x > finite_bounds[i]).astype(mx.int32)
+    else:
+        # Large codebook (8-bit = 256 levels): chunk to avoid memory blowup.
+        # Process in spatial chunks to cap peak memory.
+        original_shape = x.shape
+        x_flat = x.reshape(-1)
+        n = x_flat.shape[0]
+        chunk_size = max(1, min(n, 65536))  # Process 64K elements at a time
+        indices_parts = []
+
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            chunk = x_flat[start:end]
+            # For this chunk, broadcast with all centroids is manageable
+            # chunk: (chunk_size,), centroids: (n_levels,)
+            dists = mx.abs(chunk[..., None] - centroids)  # (chunk_size, n_levels)
+            chunk_indices = mx.argmin(dists, axis=-1)
+            indices_parts.append(chunk_indices)
+
+        indices = mx.concatenate(indices_parts, axis=0).reshape(original_shape)
 
     return indices, centroids
 

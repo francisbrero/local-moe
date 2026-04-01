@@ -85,13 +85,23 @@ def test_builtin_kv_quant(tier: str = "S", kv_bits: int | None = None):
     if peak_gpu is not None:
         print(f"  Peak GPU memory: {peak_gpu:.0f} MB")
 
-    # Perplexity
+    # Perplexity via single forward pass (does NOT exercise quantized KV cache).
+    # This measures model quality independent of KV cache path.
+    # The generation output above DOES exercise the quantized KV cache.
     ppl_results = {}
     for name, text in PERPLEXITY_PASSAGES.items():
         ppl = compute_perplexity(model, tokenizer, text)
         ppl_results[name] = ppl
     avg_ppl = sum(ppl_results.values()) / len(ppl_results)
-    print(f"  Avg perplexity: {avg_ppl:.2f}")
+    print(f"  Forward-pass perplexity: {avg_ppl:.2f}")
+
+    # Generation quality: generate a deterministic response and capture it
+    # for cross-config comparison. This exercises the KV cache path.
+    quality_prompt = "List the first 10 prime numbers and explain why 1 is not prime."
+    quality_response = mlx_lm.generate(
+        model, tokenizer, prompt=quality_prompt, verbose=False, **gen_kwargs
+    )
+    print(f"  Generation sample ({label}): {quality_response[:80]}...")
 
     results = {
         "tier": tier,
@@ -104,8 +114,9 @@ def test_builtin_kv_quant(tier: str = "S", kv_bits: int | None = None):
         "tokens_generated": n_tokens,
         "elapsed_s": round(elapsed, 3),
         "tok_s": round(tok_s, 1),
-        "perplexity": ppl_results,
-        "avg_perplexity": round(avg_ppl, 2),
+        "forward_pass_perplexity": ppl_results,
+        "avg_forward_pass_ppl": round(avg_ppl, 2),
+        "quality_response": quality_response,
         "model_config": model_config,
     }
 
@@ -165,13 +176,6 @@ def test_long_context(tier: str = "S", kv_bits: int | None = None, gen_tokens: i
     print(f"  Long-context {label}: {n_tokens} tokens in {elapsed:.2f}s = {tok_s:.1f} tok/s")
     print(f"  RSS delta: {rss_after - rss_before:.0f} MB, peak GPU: {peak_gpu} MB")
 
-    # Perplexity on generated text (rough quality check)
-    ppl_results = {}
-    for name, text in PERPLEXITY_PASSAGES.items():
-        ppl = compute_perplexity(model, tokenizer, text)
-        ppl_results[name] = ppl
-    avg_ppl = sum(ppl_results.values()) / len(ppl_results)
-
     return {
         "tier": tier,
         "kv_bits": kv_bits,
@@ -182,7 +186,6 @@ def test_long_context(tier: str = "S", kv_bits: int | None = None, gen_tokens: i
         "tok_s": round(tok_s, 1),
         "rss_delta_mb": round(rss_after - rss_before, 1),
         "peak_gpu_mb": peak_gpu,
-        "avg_perplexity": round(avg_ppl, 2),
     }
 
 
@@ -226,10 +229,20 @@ def main():
         # Summary for this tier
         if tier_results:
             print(f"\n  === {tier} Summary ===")
-            print(f"  {'Config':>10} {'tok/s':>8} {'RSS Δ MB':>10} {'Avg PPL':>10}")
+            print(f"  {'Config':>10} {'tok/s':>8} {'RSS Δ MB':>10} {'Fwd PPL':>10}")
             print(f"  {'-'*40}")
             for label, r in tier_results.items():
-                print(f"  {label:>10} {r['tok_s']:>8.1f} {r['rss_delta_mb']:>10.1f} {r['avg_perplexity']:>10.2f}")
+                print(f"  {label:>10} {r['tok_s']:>8.1f} {r['rss_delta_mb']:>10.1f} {r['avg_forward_pass_ppl']:>10.2f}")
+
+            # Compare generated text between FP16 and kv4 (exercises quantized KV cache)
+            if "fp16" in tier_results and "kv4" in tier_results:
+                fp16_gen = tier_results["fp16"].get("quality_response", "")
+                kv4_gen = tier_results["kv4"].get("quality_response", "")
+                match = fp16_gen == kv4_gen
+                print(f"  Generation match (FP16 vs kv4): {'IDENTICAL' if match else 'DIFFERENT'}")
+                if not match:
+                    print(f"    FP16: {fp16_gen[:100]}...")
+                    print(f"    kv4:  {kv4_gen[:100]}...")
 
     # Long context tests on S tier
     print("\n--- Long Context Tests (S tier, 512 tokens) ---")
@@ -249,28 +262,37 @@ def main():
 
     if long_results:
         print(f"\n  === Long Context Summary ===")
-        print(f"  {'Config':>10} {'tok/s':>8} {'RSS Δ MB':>10} {'Avg PPL':>10}")
-        print(f"  {'-'*40}")
+        print(f"  {'Config':>10} {'tok/s':>8} {'RSS Δ MB':>10}")
+        print(f"  {'-'*30}")
         for label, r in long_results.items():
-            print(f"  {label:>10} {r['tok_s']:>8.1f} {r['rss_delta_mb']:>10.1f} {r['avg_perplexity']:>10.2f}")
+            print(f"  {label:>10} {r['tok_s']:>8.1f} {r['rss_delta_mb']:>10.1f}")
 
-    # Overall decision gate
+    # Overall decision gate based on generation quality comparison
     print("\n=== DECISION GATE ===")
+    print("  Quality assessment: comparing generated text between FP16 and kv4 configs.")
+    print("  (Generation exercises the quantized KV cache path.)")
     gate_passed = True
     for tier, tier_results in all_results.items():
         if "fp16" in tier_results and "kv4" in tier_results:
-            ppl_delta = tier_results["kv4"]["avg_perplexity"] - tier_results["fp16"]["avg_perplexity"]
-            print(f"  {tier}: 4-bit KV PPL delta = {ppl_delta:+.2f}")
-            if abs(ppl_delta) >= 0.5:
+            fp16_gen = tier_results["fp16"].get("quality_response", "")
+            kv4_gen = tier_results["kv4"].get("quality_response", "")
+            match = fp16_gen == kv4_gen
+            print(f"  {tier}: generation match = {'IDENTICAL' if match else 'DIFFERENT'}")
+            if not match:
+                # Different generation is expected with sampling. For greedy decode
+                # (no sampler), identical output means the KV quantization has no
+                # measurable effect on the decoded sequence.
+                print(f"    Note: Different outputs expected if using non-greedy sampling.")
                 gate_passed = False
 
     if gate_passed:
-        print("\n  RESULT: Built-in 4-bit KV quantization preserves quality across tiers!")
+        print("\n  RESULT: Built-in 4-bit KV quantization produces identical output!")
         print("  DECISION: Scope issue to characterization + practical integration guide.")
         print("  TurboQuant rotation adds complexity without clear benefit over built-in approach.")
     else:
-        print("\n  RESULT: Built-in 4-bit KV quantization degrades quality.")
-        print("  DECISION: Proceed with custom TurboQuant rotation-based compression.")
+        print("\n  RESULT: Built-in 4-bit KV quantization produces different output.")
+        print("  Note: Check if differences are due to sampling randomness.")
+        print("  DECISION: Further investigation needed before concluding.")
 
     print("\n=== Done ===")
 

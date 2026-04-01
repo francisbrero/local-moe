@@ -126,9 +126,10 @@ def main():
         print(f"--- {tier}: {cfg['name']} ({cfg['n_kv_heads']} KV heads, dim={cfg['head_dim']}) ---")
 
         # Compression at various context lengths
-        print(f"\n  Compression ratio ({args.bits}-bit):")
-        print(f"  {'Context':>8} {'FP16 MB':>10} {'Comp MB':>10} {'Ratio':>8} {'Quant ms':>10}")
-        print(f"  {'-'*48}")
+        n_layers = cfg["n_layers"]
+        print(f"\n  Compression ratio ({args.bits}-bit), per-layer and total ({n_layers} layers):")
+        print(f"  {'Context':>8} {'FP16/lyr':>10} {'Comp/lyr':>10} {'Ratio':>8} {'FP16 total':>12} {'Comp total':>12} {'Quant ms':>10}")
+        print(f"  {'-'*72}")
 
         for seq_len in [512, 2048, 4096, 8192, 16384]:
             result = measure_compression(
@@ -140,7 +141,12 @@ def main():
             )
             fp16_mb = result["fp16_bytes"] / (1024 * 1024)
             comp_mb = result["compressed_bytes"] / (1024 * 1024)
-            print(f"  {seq_len:>8} {fp16_mb:>10.2f} {comp_mb:>10.2f} {result['compression_ratio']:>8.2f}x {result['quantize_time_ms']:>10.1f}")
+            fp16_total = fp16_mb * n_layers
+            comp_total = comp_mb * n_layers
+            result["fp16_total_mb"] = round(fp16_total, 2)
+            result["compressed_total_mb"] = round(comp_total, 2)
+            result["n_layers"] = n_layers
+            print(f"  {seq_len:>8} {fp16_mb:>10.2f} {comp_mb:>10.2f} {result['compression_ratio']:>8.2f}x {fp16_total:>12.1f} {comp_total:>12.1f} {result['quantize_time_ms']:>10.1f}")
 
             log_experiment(
                 experiment_name=f"turbo_quant_memory_{tier.lower()}_k{args.bits}v{args.bits}_{seq_len}",
