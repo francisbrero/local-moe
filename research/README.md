@@ -29,6 +29,7 @@ Each hypothesis draws an analogy from another field of computer science where si
 | H5  | [Layer LOD — variable precision by depth](./h5-layer-lod.md)          | Game engine LOD                | U-shape confirmed, mlx-optiq (2.3x accuracy), llama.cpp regex quant, CoopQ                | **Highest — immediately actionable with existing tools**       |
 | H6  | [Activation sparsity prediction](./h6-activation-sparsity.md)         | Frustum culling                | PowerInfer (27.8x), TEAL (1.5-1.8x, training-free), TurboSparse (90% sparsity)            | **High — TEAL requires zero training, CMoE converts in 5 min** |
 | H7  | [KV cache compression](./h7-kv-cache-compression.md)                  | Video codec lossy compression  | TurboQuant (Google, ICLR 2026), MLX-LM built-in QuantizedKVCache                           | **Complete — built-in `kv_bits=4` works perfectly, zero quality loss** |
+| H8  | [Safetensors direct streaming](./h8-safetensors-direct-streaming.md)  | Memory-mapped file I/O (mmap)  | SSD Layer LOD experiment (H0+H5), safetensors mmap, MLX native loading                      | **High — eliminates 13x serialization overhead found in H0+H5 experiment** |
 
 
 ## How to Use This

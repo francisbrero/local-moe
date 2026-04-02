@@ -1,6 +1,6 @@
 # H5: Layer LOD — Variable Precision by Depth
 
-**Status**: Untested
+**Status**: Mixed (H0+H5 combo tested — architecture works, serialization bottleneck; see [experiment report](./h0-h5-ssd-layer-lod-experiment.md))
 **Analogy**: Game engine Level of Detail (LOD)
 **Bottleneck addressed**: Memory capacity + bandwidth
 
@@ -108,7 +108,7 @@ Multiple lines of evidence suggest middle layers are over-parameterized:
 3. ~~Can we determine the allocation automatically?~~ **Yes** — mlx-optiq (KL-divergence), CoopQ (Shapley values), LSAQ (Jaccard similarity) all do this.
 4. How does this interact with GQA? Attention heads may have different sensitivity than FFN.
 5. What about MoE models — should expert layers get different LOD than attention layers? (JANG from H1 suggests attention at 8-bit, experts at 2-3 bit.)
-6. Can we combine LOD quantization with layer streaming (H5 + Approach 8 from Agents.md) — keep first/last layers in RAM at Q4, stream middle layers from SSD at Q2?
+6. ~~Can we combine LOD quantization with layer streaming (H5 + Approach 8 from Agents.md) — keep first/last layers in RAM at Q4, stream middle layers from SSD at Q2?~~ **Tested in [SSD Layer LOD experiment](./h0-h5-ssd-layer-lod-experiment.md)**. Architecture works (memory stable, no OOM), but npz serialization bottleneck makes it 0.005 tok/s. See H8 for the fix.
 
 ## Experiment Plan
 
