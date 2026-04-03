@@ -1,15 +1,77 @@
 # H8b: Q2 Streaming with Cache Optimization — Context
 
-**Status**: All phases implemented (0-5), code reviewed, ready for execution
+**Status**: All phases executed. Experiment complete.
 **Issue**: #32
 **Branch**: `experiment/q2-streaming-cache-optimization`
 
 ## Current State
 
-- Plan reviewed through 7 automated rounds, approved by user
-- All phases (0, 0b, 1, 2, 3, 4, 5) implemented in `scripts/q2_streaming_cache_opt.py`
-- Code reviewed through 9 automated rounds, all material findings resolved
-- Ready to run on hardware with Qwen2.5-72B-Instruct-4bit
+- All phases (0, 0b, 1, 2, 3, 4, 5) executed on 24 GB M4 Pro
+- Two runtime bugs fixed: `mx.log_softmax` → `nn.log_softmax`, `Q4_GROUP_SIZE` 128 → 64
+- Results logged to `experiments.jsonl`
+
+## Experimental Results
+
+### Phase 0: Q2 Block Micro-benchmark — PASS
+- Steady-state p50: 16.0 ms/block (load=0.1, assign=0.1, eval=7.9, forward=7.5, evict=0.5)
+- Hard gate (< 150ms): PASS
+- Cold-cache ceiling: 0.976 tok/s
+- Required hit rate for 0.3 tok/s: 0% (projection gate PASS)
+- Page cache coverage estimate: 54%
+
+### Phase 0b: Q2 Quality Pilot (7B) — PASS
+- Baseline NLL (all-Q4): 0.2155
+- Q2 NLL (3 representative blocks): 0.2615
+- NLL delta: 0.046 (gate < 1.0: PASS)
+
+### Phase 1: Q2 Checkpoint Preparation — PASS
+- 64 blocks quantized to Q2 (indices 8-71)
+- 5 shards, 16.35 GB total (vs ~29.4 GB Q4)
+- Per-block: 261.6 MB Q2 vs 470.9 MB Q4 (44.4% reduction)
+- Verification forward pass: OK
+
+### Phase 2: Mixed-Precision Streaming — PASS
+- **0.164 tok/s** (6115 ms/tok), TTFT: 21.9s
+- 8+8 Q4 resident + 64 Q2 streamed blocks
+- Block load p50/p95: 67/78 ms
+- Peak RSS: 7009 MB, min available: 4.3 GB
+- RSS variance: 9 MB (very stable)
+- Mean NLL: 0.269, coherent output
+- Pageouts: 12 MB (minimal swap pressure)
+
+### Phase 3: Cache Optimization — FAIL (no improvement)
+- Synthetic madvise: 82% raw throughput improvement (6.1 → 11.1 GB/s)
+- A/B comparison (20 tokens each, page cache evicted between configs):
+  - none: 0.103 tok/s (baseline)
+  - prefault: 0.044 tok/s (-57%) — overhead dominates
+  - readahead: 0.104 tok/s (+1.8%) — negligible
+- **Conclusion**: macOS already optimizes NVMe sequential reads. User-space cache hints don't help at application level.
+
+### Phase 4: Quality Validation — MIXED
+- **Phase 4a (7B)**: FAIL — PPL 3.80 → 27.29 (delta 23.5). Q2 severely degrades 7B.
+- **Phase 4b (72B)**: PASS — NLL delta 0.099 (Q4: 0.421, Q2: 0.520). Teacher-forced text identical.
+- **Conclusion**: 72B models are robust to Q2 quantization; 7B models are not. Q2 is viable only for large models.
+
+### Phase 5: 16 GB Projection — PROVISIONAL PASS (no OOM)
+- Config 1 (3-Q4/77-Q2): 0.041 tok/s, min available 3.8 GB, pageouts 62 MB
+- Config 2 (all-80-Q2): 0.032 tok/s, min available 3.9 GB, pageouts 88 MB
+- Both configs: no OOM, coherent output, <100 MB pageouts
+- tok/s gate (>= 0.1): FAIL for both under memory pressure
+- Note: 13 blocks fell back to Q4 streaming (Q2 shards only cover indices 8-71)
+
+## Key Findings
+
+1. **Q2 streaming works** — 72B model generates coherent text with Q2 streamed blocks at 0.164 tok/s (no memory pressure)
+2. **44% memory reduction** — Q2 blocks are 261 MB vs 471 MB Q4 (16.35 GB vs ~29.4 GB)
+3. **Cache optimization doesn't help** — macOS NVMe stack already optimal; madvise/prefault/readahead add overhead
+4. **Quality scales with model size** — Q2 is devastating for 7B (23x PPL increase) but tolerable for 72B (0.1 NLL delta)
+5. **16 GB is feasible but slow** — No OOM under simulated pressure, but 0.03-0.04 tok/s is impractical
+6. **Bottleneck is I/O, not compute** — Block load time (~67ms) dominates forward time (~7.5ms), 9:1 ratio
+
+## Runtime Bugs Fixed
+
+29. **`mx.log_softmax` not in mlx.core** (high): Changed to `nn.log_softmax` (5 call sites)
+30. **`Q4_GROUP_SIZE` wrong** (high): Was 128, actual model uses 64. Caused shape mismatch in Phase 5 Q4 fallback.
 
 ## Key Decisions
 

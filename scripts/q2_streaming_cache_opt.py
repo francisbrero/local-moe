@@ -68,7 +68,7 @@ Q2_CACHE_BASE = Path.home() / ".cache" / "local-moe" / "q2-blocks"
 Q2_BITS = 2
 Q2_GROUP_SIZE = 64
 Q4_BITS = 4
-Q4_GROUP_SIZE = 128
+Q4_GROUP_SIZE = 64
 BLOCKS_PER_SHARD = 13  # ~3.4 GB per shard
 
 
@@ -710,7 +710,7 @@ def _compute_generation_nll(model, inner, tokenizer, prompt_tokens, n_tokens=20,
 
     for i in range(n_tokens):
         last_logits = logits[0, -1, :]
-        log_probs = mx.log_softmax(last_logits)
+        log_probs = nn.log_softmax(last_logits)
         next_token = mx.argmax(last_logits).item()
 
         if i > 0:
@@ -1032,7 +1032,7 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
 
         # NLL for directional quality tracking (self-score only — primary quality
         # gate is Phase 4 which uses teacher forcing against a reference)
-        log_probs = mx.log_softmax(logits[0, -1, :])
+        log_probs = nn.log_softmax(logits[0, -1, :])
         next_token = mx.argmax(logits[0, -1, :]).item()
         nll = -log_probs[next_token].item()
         nlls.append(nll)
@@ -1618,7 +1618,7 @@ def _compute_ppl_on_text(model, inner, tokenizer, text: str, max_tokens: int = 2
     mx.eval(logits)
 
     # NLL for each token (teacher-forced: score token t+1 given tokens 0..t)
-    log_probs = mx.log_softmax(logits[0, :-1, :], axis=-1)
+    log_probs = nn.log_softmax(logits[0, :-1, :], axis=-1)
     target_tokens = mx.array(tokens[1:])
     per_token_nll = -log_probs[mx.arange(len(tokens) - 1), target_tokens]
     mx.eval(per_token_nll)
@@ -1792,7 +1792,7 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
             logits = model_72b.lm_head(h)
         mx.eval(logits)
 
-        log_probs = mx.log_softmax(logits[0, -1, :])
+        log_probs = nn.log_softmax(logits[0, -1, :])
         next_token = mx.argmax(logits[0, -1, :]).item()
         nll = -log_probs[next_token].item()
         q4_nlls.append(nll)
@@ -1865,7 +1865,7 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
         mx.eval(logits)
 
         # Score against Q4 reference token at the NEXT position
-        log_probs = mx.log_softmax(logits[0, -1, :])
+        log_probs = nn.log_softmax(logits[0, -1, :])
         ref_token = q4_ref_tokens[tok_i + 1]
         nll = -log_probs[ref_token].item()
         q2_nlls.append(nll)
