@@ -872,24 +872,23 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
     h = inner.embed_tokens(input_ids)
     mask = "causal"
 
-    # Shard cache shared across layers within the same forward pass
-    # (consecutive layers often share the same Q2 shard)
-    shard_cache = {}
     for i, layer in enumerate(inner.layers):
         if i in resident_set:
             h = layer(h, mask, kv_cache[i])
         else:
+            # Per-block shard scope: load, extract, release immediately
+            # This ensures only one block's worth of memory is pinned at a time
+            shard_cache = {}
             q2_tensors = load_q2_block(i, q2_index, shard_cache)
             assign_q2_block_weights(blocks[i], i, q2_tensors)
             mx.eval(blocks[i].parameters())
-            del q2_tensors
+            del shard_cache, q2_tensors
 
             h = layer(h, mask, kv_cache[i])
             mx.eval(h, kv_cache[i].state)
 
             evict_block(blocks[i])
             restore_q4_block_metadata(blocks[i])
-    del shard_cache
 
     h = inner.norm(h)
     if hasattr(model, "args") and model.args.tie_word_embeddings:
@@ -919,16 +918,17 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
         h = inner.embed_tokens(input_ids)
 
         token_load_ms = []
-        shard_cache = {}  # Shared across layers within one token
         for i, layer in enumerate(inner.layers):
             if i in resident_set:
                 h = layer(h, None, kv_cache[i])
             else:
                 t_block = time.perf_counter()
+                # Per-block shard scope to avoid holding refs to all shards
+                shard_cache = {}
                 q2_tensors = load_q2_block(i, q2_index, shard_cache)
                 assign_q2_block_weights(blocks[i], i, q2_tensors)
                 mx.eval(blocks[i].parameters())
-                del q2_tensors
+                del shard_cache, q2_tensors
                 block_load_ms = (time.perf_counter() - t_block) * 1000
                 token_load_ms.append(block_load_ms)
 
@@ -937,7 +937,6 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
 
                 evict_block(blocks[i])
                 restore_q4_block_metadata(blocks[i])
-        del shard_cache
 
         h = inner.norm(h)
         if hasattr(model, "args") and model.args.tie_word_embeddings:
@@ -945,7 +944,8 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
         else:
             logits = model.lm_head(h)
 
-        # NLL for quality tracking
+        # NLL for directional quality tracking (self-score only — primary quality
+        # gate is Phase 4 which uses teacher forcing against a reference)
         log_probs = mx.log_softmax(logits[0, -1, :])
         next_token = mx.argmax(logits[0, -1, :]).item()
         nll = -log_probs[next_token].item()
