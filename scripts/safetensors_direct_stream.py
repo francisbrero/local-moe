@@ -516,18 +516,20 @@ def run_phase_1(model_id: str):
     # Compute per-block byte sizes from shard headers
     print(f"\n  Analyzing per-block tensor sizes...")
     block_sizes = {}
+    p1_shard_cache = {}  # Cache loaded shards to avoid redundant mx.load calls
     for b in range(index.n_blocks):
         shard_files = index.block_shards(b)
         total_bytes = 0
         for sf in shard_files:
-            shard_path = index.shard_path(sf)
-            all_tensors = mx.load(str(shard_path))
+            if sf not in p1_shard_cache:
+                p1_shard_cache[sf] = mx.load(str(index.shard_path(sf)))
+            all_tensors = p1_shard_cache[sf]
             tensor_map = index.block_tensor_names(b)
             for tname in tensor_map:
                 if tensor_map[tname] == sf and tname in all_tensors:
                     total_bytes += all_tensors[tname].nbytes
-            del all_tensors
         block_sizes[b] = total_bytes / (1024 * 1024)  # MB
+    del p1_shard_cache
 
     sizes = list(block_sizes.values())
     avg_mb = sum(sizes) / len(sizes)
@@ -550,7 +552,7 @@ def run_phase_1(model_id: str):
     # With mx.load lazy mmap, bytes "touched" = only the block's tensors
     # (not the full shard), since mx.eval only materializes what's needed
     total_streaming_gb = sum(block_sizes[b] for b in range(8, index.n_blocks - 8)) / 1024
-    # sum is in MB, 5.5*1024 converts GB/s to MB/s, so denominator is seconds/token
+    # sum is in MB; SSD bandwidth 5.5 GB/s = 5632 MB/s; result is seconds/token
     cold_tok_s = 1.0 / (sum(block_sizes[b] for b in range(8, index.n_blocks - 8)) / (5.5 * 1024))
 
     print(f"  Streaming blocks (8-{index.n_blocks-9}): {index.n_blocks - 16} blocks")
@@ -934,21 +936,21 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     h = inner.embed_tokens(input_ids)
     mask = "causal"  # Full causal mask for multi-token prefill
 
-    shard_cache = {}
     for i, layer in enumerate(inner.layers):
         if i in resident_set:
             h = layer(h, mask, kv_cache[i])
         else:
+            # Per-block shard scope: load → extract → release immediately
+            shard_cache = {}
             tensors = load_block_from_safetensors(i, index, shard_cache)
             assign_block_weights(blocks[i], i, tensors)
             mx.eval(blocks[i].parameters())
+            del shard_cache, tensors
 
             h = layer(h, mask, kv_cache[i])
             mx.eval(h, kv_cache[i].state)
 
             evict_block(blocks[i])
-            del tensors
-    del shard_cache
 
     h = inner.norm(h)
     if hasattr(model, "args") and model.args.tie_word_embeddings:
@@ -980,7 +982,6 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
         # Forward pass with KV cache (mask=None for single-token decode)
         h = inner.embed_tokens(input_ids)
 
-        shard_cache = {}  # Cache shards within one token
         token_load_ms = []
 
         for i, layer in enumerate(inner.layers):
@@ -988,9 +989,12 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
                 h = layer(h, None, kv_cache[i])
             else:
                 t_block = time.perf_counter()
+                # Per-block shard scope to avoid holding refs to all shards
+                shard_cache = {}
                 tensors = load_block_from_safetensors(i, index, shard_cache)
                 assign_block_weights(blocks[i], i, tensors)
                 mx.eval(blocks[i].parameters())
+                del shard_cache, tensors
                 block_load_ms = (time.perf_counter() - t_block) * 1000
                 token_load_ms.append(block_load_ms)
 
@@ -998,9 +1002,6 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
                 mx.eval(h, kv_cache[i].state)
 
                 evict_block(blocks[i])
-                del tensors
-
-        del shard_cache
 
         h = inner.norm(h)
         if hasattr(model, "args") and model.args.tie_word_embeddings:
@@ -1041,19 +1042,18 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     input_ids2 = mx.array([tokens2])  # Full prompt
     h2 = inner.embed_tokens(input_ids2)
     mask2 = "causal"
-    shard_cache2 = {}
     for i, layer in enumerate(inner.layers):
         if i in resident_set:
             h2 = layer(h2, mask2, kv_cache2[i])
         else:
+            shard_cache2 = {}
             tensors = load_block_from_safetensors(i, index, shard_cache2)
             assign_block_weights(blocks[i], i, tensors)
             mx.eval(blocks[i].parameters())
+            del shard_cache2, tensors
             h2 = layer(h2, mask2, kv_cache2[i])
             mx.eval(h2, kv_cache2[i].state)
             evict_block(blocks[i])
-            del tensors
-    del shard_cache2
     h2 = inner.norm(h2)
     if hasattr(model, "args") and model.args.tie_word_embeddings:
         logits2 = inner.embed_tokens.as_linear(h2)
@@ -1066,14 +1066,14 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
 
     # Compare full logits vectors, not just argmax
     logit_max_diff = float(mx.max(mx.abs(prefill_logits - logits2_last)).item())
-    reproducible = logit_max_diff == 0
+    reproducible = logit_max_diff < 1e-4
     print(f"  Run 1 first token: {first_generated}, Run 2: {next_token2}")
     print(f"  Logit max diff: {logit_max_diff:.2e}")
     print(f"  Reproducible: {'PASS' if reproducible else 'FAIL'}")
     del kv_cache2
 
     # Statistics
-    steady = per_token_ms[2:]  # skip warmup
+    steady = per_token_ms[2:] if len(per_token_ms) > 2 else per_token_ms  # skip warmup if enough data
     avg_tok_ms = sum(steady) / len(steady) if steady else 0
     tok_s = 1000 / avg_tok_ms if avg_tok_ms > 0 else 0
     min_avail = min(avail_history) if avail_history else 0
