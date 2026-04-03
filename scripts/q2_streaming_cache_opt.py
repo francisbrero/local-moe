@@ -91,23 +91,32 @@ def measure_file_residency(file_path: str, offset: int = 0, length: int = 0) -> 
         file_size = os.fstat(fd).st_size
         if length == 0:
             length = file_size
+        # macOS requires page-aligned offset for mmap
+        aligned_offset = (offset // PAGE_SIZE) * PAGE_SIZE
+        align_delta = offset - aligned_offset
+        map_length = length + align_delta
         # mmap the file region
         addr = libc.mmap(
-            None, ctypes.c_size_t(length), ctypes.c_int(PROT_READ),
-            ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(offset),
+            None, ctypes.c_size_t(map_length), ctypes.c_int(PROT_READ),
+            ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(aligned_offset),
         )
         if addr == ctypes.c_void_p(-1).value:
             return 0.0
         try:
-            n_pages = (length + PAGE_SIZE - 1) // PAGE_SIZE
+            # Measure only the pages covering the requested range
+            n_pages = (length + align_delta + PAGE_SIZE - 1) // PAGE_SIZE
             vec = (ctypes.c_char * n_pages)()
-            ret = libc.mincore(ctypes.c_void_p(addr), ctypes.c_size_t(length), vec)
+            ret = libc.mincore(ctypes.c_void_p(addr), ctypes.c_size_t(map_length), vec)
             if ret != 0:
                 return 0.0
-            resident = sum(1 for i in range(n_pages) if vec[i] != b'\x00')
-            return resident / n_pages if n_pages > 0 else 0.0
+            # Count pages covering the actual requested region
+            first_page = align_delta // PAGE_SIZE
+            last_page = (align_delta + length + PAGE_SIZE - 1) // PAGE_SIZE
+            relevant_pages = last_page - first_page
+            resident = sum(1 for i in range(first_page, last_page) if vec[i] != b'\x00')
+            return resident / relevant_pages if relevant_pages > 0 else 0.0
         finally:
-            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(length))
+            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(map_length))
     finally:
         os.close(fd)
 
@@ -1225,7 +1234,7 @@ def _measure_block_residency_before_load(block_idx: int, q2_index: Q2BlockIndex)
 
 
 def _run_streaming_pass(
-    model, inner, blocks, kv_cache, q2_index, resident_set,
+    model, inner, blocks, q2_index, resident_set,
     tokens, n_tokens, tokenizer,
     optimization: str = "none",
     measure_residency: bool = False,
@@ -1234,13 +1243,13 @@ def _run_streaming_pass(
 
     optimization: "none", "prefault", or "readahead"
     Returns dict with per-token metrics.
+    Creates a fresh KV cache internally for each pass.
     """
     from mlx_lm.models.cache import make_prompt_cache
 
     n_blocks = len(blocks)
     streaming_indices = [i for i in range(n_blocks) if i not in resident_set]
 
-    # Fresh KV cache for each pass
     kv_cache = make_prompt_cache(model)
 
     # Prefill
@@ -1288,11 +1297,17 @@ def _run_streaming_pass(
 
         token_load_ms = []
         token_residencies = []
+        readahead_thread = None  # Track readahead thread for joining
 
         for i, layer in enumerate(inner.layers):
             if i in resident_set:
                 h = layer(h, None, kv_cache[i])
             else:
+                # Join previous readahead thread before measuring/loading
+                if readahead_thread is not None:
+                    readahead_thread.join(timeout=0.5)
+                    readahead_thread = None
+
                 # Measure residency before load
                 if measure_residency:
                     r = _measure_block_residency_before_load(i, q2_index)
@@ -1313,11 +1328,11 @@ def _run_streaming_pass(
                             next_streaming = si
                             break
                     if next_streaming is not None:
-                        t = threading.Thread(
+                        readahead_thread = threading.Thread(
                             target=_readahead_next_block,
                             args=(next_streaming, q2_index),
                         )
-                        t.start()
+                        readahead_thread.start()
 
                 t_block = time.perf_counter()
                 shard_cache = {}
@@ -1432,7 +1447,6 @@ def run_phase_3(model_id: str, n_tokens: int = 20):
 
     prompt = "The key innovation of the transformer architecture is"
     tokens = tokenizer.encode(prompt)
-    kv_cache = make_prompt_cache(model)
 
     configs = ["none"]
     if not madvise_skip:
@@ -1446,7 +1460,7 @@ def run_phase_3(model_id: str, n_tokens: int = 20):
         vm_before = get_vm_stat()
 
         pass_result = _run_streaming_pass(
-            model, inner, blocks, kv_cache, q2_index, resident_set,
+            model, inner, blocks, q2_index, resident_set,
             tokens, n_tokens, tokenizer,
             optimization=config_name,
             measure_residency=True,
@@ -1970,6 +1984,8 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
         # Check if Q2 index has the needed blocks
         missing_q2 = [i for i in streaming_indices if not q2_index.has_block(i)]
         actual_label = cfg["name"]
+        # Hoist Q4 index construction outside loops to avoid per-block/per-token rebuilds
+        q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id)) if missing_q2 else None
         if missing_q2:
             print(f"  WARNING: Q2 index missing blocks: {missing_q2}")
             print(f"  Falling back to Q4 for missing blocks")
@@ -2008,7 +2024,6 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                 restore_q4_block_metadata(blocks[i])
             else:
                 # Fallback: Q4 streaming for blocks not in Q2 index
-                q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id))
                 shard_cache = {}
                 q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
                 assign_block_weights(blocks[i], i, q4_tensors)
