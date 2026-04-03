@@ -210,6 +210,7 @@ class Q2BlockIndex:
     def __init__(self, q2_dir: Path):
         self.q2_dir = q2_dir
         self._block_map: dict[int, dict[str, str]] = defaultdict(dict)
+        self._shard_headers: dict[str, dict] = {}
         self._build_index()
 
     def _build_index(self):
@@ -224,6 +225,21 @@ class Q2BlockIndex:
                 block_idx = int(m.group(1))
                 self._block_map[block_idx][tensor_name] = shard_file
 
+    def _get_shard_header(self, shard_file: str) -> dict:
+        """Parse safetensors header to get tensor byte offsets."""
+        if shard_file not in self._shard_headers:
+            shard_path = str(self.shard_path(shard_file))
+            with open(shard_path, "rb") as f:
+                header_size = int.from_bytes(f.read(8), "little")
+                header_bytes = f.read(header_size)
+            header = json.loads(header_bytes)
+            # Data starts after 8-byte length prefix + header
+            self._shard_headers[shard_file] = {
+                "tensors": header,
+                "data_offset": 8 + header_size,
+            }
+        return self._shard_headers[shard_file]
+
     def has_block(self, block_idx: int) -> bool:
         return block_idx in self._block_map
 
@@ -235,6 +251,33 @@ class Q2BlockIndex:
 
     def shard_path(self, shard_file: str) -> Path:
         return self.q2_dir / shard_file
+
+    def block_byte_range(self, block_idx: int) -> dict[str, tuple[int, int]]:
+        """Return {shard_file: (offset, length)} for a block's tensors in each shard.
+
+        Uses safetensors header to find the min/max byte offsets of the block's tensors.
+        """
+        result = {}
+        tensor_map = self.block_tensor_names(block_idx)
+        # Group tensors by shard
+        shard_tensors: dict[str, list[str]] = defaultdict(list)
+        for tname, sfile in tensor_map.items():
+            shard_tensors[sfile].append(tname)
+
+        for shard_file, tnames in shard_tensors.items():
+            header = self._get_shard_header(shard_file)
+            data_offset = header["data_offset"]
+            min_off = float("inf")
+            max_end = 0
+            for tname in tnames:
+                info = header["tensors"].get(tname, {})
+                offsets = info.get("data_offsets", None)
+                if offsets and len(offsets) == 2:
+                    min_off = min(min_off, offsets[0])
+                    max_end = max(max_end, offsets[1])
+            if min_off < float("inf"):
+                result[shard_file] = (data_offset + int(min_off), int(max_end - min_off))
+        return result
 
 
 def load_q2_block(
@@ -1252,10 +1295,11 @@ def _run_streaming_pass(
 
                 # Apply optimization
                 if optimization == "prefault":
-                    for shard_file in q2_index.block_shards(i):
+                    # Prefault only the block's byte range, not entire shard
+                    for shard_file, (offset, length) in q2_index.block_byte_range(i).items():
                         sp = str(q2_index.shard_path(shard_file))
                         if os.path.exists(sp):
-                            _prefault_shard_range(sp, 0, os.path.getsize(sp))
+                            _prefault_shard_range(sp, offset, length)
                 elif optimization == "readahead":
                     # Readahead the NEXT streaming block in a background thread
                     next_streaming = None
@@ -1589,7 +1633,7 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
     nll_mean = float(np.mean(q2_nlls_50)) if q2_nlls_50 else 0
     print(f"  Mean NLL over 50 tokens: {nll_mean:.4f} (std: {nll_std:.4f})")
 
-    del model_7b, tokenizer_7b
+    del model_7b, tokenizer_7b, blocks_7b, inner_7b
     gc.collect()
 
     # ── Phase 4b: 72B quality sanity check ──
@@ -1637,7 +1681,7 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
         else:
             shard_cache = {}
             q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
-            assign_block_weights(blocks_72b[i], q4_tensors)
+            assign_block_weights(blocks_72b[i], i, q4_tensors)
             mx.eval(blocks_72b[i].parameters())
             del shard_cache, q4_tensors
             h = layer(h, mask, kv_q4[i])
@@ -1664,7 +1708,7 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
             else:
                 shard_cache = {}
                 q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
-                assign_block_weights(blocks_72b[i], q4_tensors)
+                assign_block_weights(blocks_72b[i], i, q4_tensors)
                 mx.eval(blocks_72b[i].parameters())
                 del shard_cache, q4_tensors
                 h = layer(h, None, kv_q4[i])
@@ -1716,13 +1760,12 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
         logits = model_72b.lm_head(h)
     mx.eval(logits)
 
-    # Decode Q2
+    # Decode Q2 with teacher forcing: always feed Q4 reference tokens
     q2_nlls = []
-    q2_tokens = list(prompt_tokens)
-    q2_tokens.append(mx.argmax(logits[0, -1, :]).item())
-
-    # Score Q2 against Q4's generated tokens (teacher forcing)
     q4_ref_tokens = q4_tokens[len(prompt_tokens):]
+    q2_tokens = list(prompt_tokens)
+    # Seed with Q4's first token (not Q2's own argmax) for proper teacher forcing
+    q2_tokens.append(q4_ref_tokens[0])
 
     for tok_i in range(min(n_tokens - 1, len(q4_ref_tokens))):
         next_ids = mx.array([[q2_tokens[-1]]])
@@ -1928,9 +1971,12 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
         # For all-Q2 config, we need Q2 blocks for ALL layers (not just 8-71)
         # Check if Q2 index has the needed blocks
         missing_q2 = [i for i in streaming_indices if not q2_index.has_block(i)]
+        actual_label = cfg["name"]
         if missing_q2:
             print(f"  WARNING: Q2 index missing blocks: {missing_q2}")
             print(f"  Falling back to Q4 for missing blocks")
+            actual_label = f"{cfg['name']}-actual-Q2({len(streaming_indices)-len(missing_q2)})-Q4({len(missing_q2)})"
+            print(f"  Actual layout: {actual_label}")
 
         # Run streaming pass
         prompt = "The key innovation of the transformer architecture is"
@@ -1967,7 +2013,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                 q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id))
                 shard_cache = {}
                 q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
-                assign_block_weights(blocks[i], q4_tensors)
+                assign_block_weights(blocks[i], i, q4_tensors)
                 mx.eval(blocks[i].parameters())
                 del shard_cache, q4_tensors
                 h = layer(h, mask, kv_cache[i])
@@ -2014,7 +2060,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                     q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id))
                     shard_cache = {}
                     q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
-                    assign_block_weights(blocks[i], q4_tensors)
+                    assign_block_weights(blocks[i], i, q4_tensors)
                     mx.eval(blocks[i].parameters())
                     del shard_cache, q4_tensors
                     block_ms = (time.perf_counter() - t_block) * 1000
@@ -2079,6 +2125,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
         print(f"      Ballast verified: {'PASS' if ballast_ok else 'FAIL'}")
 
         results_by_config[cfg["name"]] = {
+            "actual_label": actual_label,
             "tok_s": round(tok_s, 4),
             "avg_tok_ms": round(avg_ms, 1),
             "ttft_ms": round(ttft_ms, 1),
