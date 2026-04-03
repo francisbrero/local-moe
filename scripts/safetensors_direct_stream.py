@@ -1132,14 +1132,16 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     measured_resident_gb = len(resident_indices) * block_size_gb
     # Non-resident overhead = consumed - resident blocks (includes embeddings, lm_head, norm, KV cache, Metal scratch, OS)
     measured_overhead_gb = measured_consumed_gb - measured_resident_gb
-    # For 16 GB projection with Q2: 3 resident Q4 blocks (minimal config)
-    projected_resident_q2_gb = 3 * block_size_gb
-    projected_total = measured_overhead_gb + projected_resident_q2_gb
+    # For 16 GB: can't fit 16 resident Q4 blocks (7.5 GB). Use minimal config:
+    # 3 resident Q4 blocks (first 2 + last 1) = 1.4 GB, rest streamed as Q2.
+    n_resident_16gb = 3
+    projected_resident_gb = n_resident_16gb * block_size_gb
+    projected_total = measured_overhead_gb + projected_resident_gb
     projected_cache = 16 - projected_total
     print(f"    Measured consumed (24 GB run): {measured_consumed_gb:.1f} GB")
     print(f"    Measured resident ({len(resident_indices)} blocks): {measured_resident_gb:.1f} GB")
     print(f"    Measured overhead (non-block): {measured_overhead_gb:.1f} GB")
-    print(f"    Projected resident (3×Q4): {projected_resident_q2_gb:.1f} GB")
+    print(f"    Projected resident ({n_resident_16gb}×Q4): {projected_resident_gb:.1f} GB")
     print(f"    Projected total: {projected_total:.1f} GB")
     print(f"    Projected page cache: {projected_cache:.1f} GB")
     print(f"    16 GB viable: {'YES' if projected_total < 10.5 else 'NO'}")
