@@ -149,7 +149,16 @@ def _find_hf_cache_path(repo_id: str) -> Path:
     Uses refs/main to resolve the pinned commit hash deterministically,
     falling back to most-recently-modified snapshot if refs/main is absent.
     """
-    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    # Respect HF_HUB_CACHE / HF_HOME environment variables
+    hf_hub_cache = os.environ.get("HF_HUB_CACHE")
+    if hf_hub_cache:
+        cache_dir = Path(hf_hub_cache)
+    else:
+        hf_home = os.environ.get("HF_HOME")
+        if hf_home:
+            cache_dir = Path(hf_home) / "hub"
+        else:
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
     slug = "models--" + repo_id.replace("/", "--")
     model_dir = cache_dir / slug
     if not model_dir.exists():
@@ -222,13 +231,16 @@ def assign_block_weights(block, block_idx: int, tensors: dict[str, mx.array]):
 
 
 def evict_block(block):
-    """Replace block weights with tiny placeholders to free memory."""
+    """Replace all block weights with tiny placeholders to free memory."""
     for name, module in block.named_modules():
         if isinstance(module, nn.QuantizedLinear):
             module.weight = mx.zeros((1,), dtype=mx.uint32)
             module.scales = mx.zeros((1,), dtype=mx.float16)
             if hasattr(module, "biases") and module.biases is not None:
                 module.biases = mx.zeros((1,), dtype=mx.float16)
+        elif hasattr(module, "weight") and module.weight is not None:
+            # Evict non-QuantizedLinear params (e.g., RMSNorm.weight)
+            module.weight = mx.zeros((1,), dtype=module.weight.dtype)
     mx.eval(block.parameters())
 
 
