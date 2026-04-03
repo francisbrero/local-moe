@@ -23,6 +23,7 @@ import gc
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from collections import defaultdict
@@ -234,10 +235,10 @@ def evict_block(block):
 # ── npz path (for comparison) ──
 
 
-def save_block_to_npz(block, idx, save_dir: Path):
+def save_block_to_npz(block, idx, save_dir: Path, force: bool = False):
     """Save a single block's weights to disk as .npz (for baseline comparison)."""
     block_file = save_dir / f"block_{idx:03d}.npz"
-    if block_file.exists():
+    if block_file.exists() and not force:
         return
     flat = {}
     for name, module in block.named_modules():
@@ -321,8 +322,10 @@ def run_phase_0(model_id: str):
     test_block_idx = 1  # Use block 1 for testing (block 0 has embeddings in same shard)
     process = psutil.Process()
 
-    # Prepare npz baseline
+    # Prepare npz baseline (force-recreate to avoid stale data)
     npz_dir = Path("/tmp/h8a_phase0_npz")
+    if npz_dir.exists():
+        shutil.rmtree(npz_dir)
     npz_dir.mkdir(parents=True, exist_ok=True)
     mx.eval(blocks[test_block_idx].parameters())
     save_block_to_npz(blocks[test_block_idx], test_block_idx, npz_dir)
@@ -547,7 +550,8 @@ def run_phase_1(model_id: str):
     # With mx.load lazy mmap, bytes "touched" = only the block's tensors
     # (not the full shard), since mx.eval only materializes what's needed
     total_streaming_gb = sum(block_sizes[b] for b in range(8, index.n_blocks - 8)) / 1024
-    cold_tok_s = 1000 / (sum(block_sizes[b] for b in range(8, index.n_blocks - 8)) / (5.5 * 1024) + 0)  # I/O only
+    # sum is in MB, 5.5*1024 converts GB/s to MB/s, so denominator is seconds/token
+    cold_tok_s = 1.0 / (sum(block_sizes[b] for b in range(8, index.n_blocks - 8)) / (5.5 * 1024))
 
     print(f"  Streaming blocks (8-{index.n_blocks-9}): {index.n_blocks - 16} blocks")
     print(f"  Total streaming data: {total_streaming_gb:.1f} GB")
@@ -629,8 +633,10 @@ def run_phase_2(model_id_7b: str):
     baseline_logits_np = np.array(baseline_logits)
     print(f"  Baseline logits captured (shape={baseline_logits_np.shape})")
 
-    # Save npz for all blocks
+    # Save npz for all blocks (force-recreate to avoid stale data)
     npz_dir = Path("/tmp/h8a_phase2_npz")
+    if npz_dir.exists():
+        shutil.rmtree(npz_dir)
     npz_dir.mkdir(parents=True, exist_ok=True)
     for b in range(n_blocks):
         save_block_to_npz(blocks[b], b, npz_dir)
@@ -1117,21 +1123,23 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     overall = gate_tok and gate_repro and gate_idem and gate_avail and gate_pageout and gate_rss and gate_coherent
     print(f"    Overall: {'PASS' if overall else 'FAIL'}")
 
-    # 16 GB projection
-    print(f"\n  --- 16 GB Projection (informational) ---")
-    fixed_non_block_gb = 1.9  # embeddings + lm_head + norm (from Phase 0 budget)
-    kv_cache_gb = 0.16  # Q4 KV, 2048 ctx (from Phase 0 budget)
-    metal_scratch_gb = 0.5  # estimated
-    os_overhead_gb = 5.0  # typical macOS overhead
-    # For 16 GB/Q2: 3 resident Q4 blocks + 0 resident Q2
-    resident_q2_gb = 3 * 0.471  # just 3 critical Q4 blocks
-    projected_total = fixed_non_block_gb + resident_q2_gb + kv_cache_gb + metal_scratch_gb + os_overhead_gb
+    # 16 GB projection (derived from measured 24 GB run values)
+    print(f"\n  --- 16 GB Projection (informational, derived from measurements) ---")
+    # Measured: total memory consumed on 24 GB = 24 - min_avail
+    measured_consumed_gb = env["memory_gb"] - min_avail
+    # Resident blocks contribution (measured): n_resident * block_size
+    block_size_gb = 0.471  # Q4 block size from Phase 1
+    measured_resident_gb = len(resident_indices) * block_size_gb
+    # Non-resident overhead = consumed - resident blocks (includes embeddings, lm_head, norm, KV cache, Metal scratch, OS)
+    measured_overhead_gb = measured_consumed_gb - measured_resident_gb
+    # For 16 GB projection with Q2: 3 resident Q4 blocks (minimal config)
+    projected_resident_q2_gb = 3 * block_size_gb
+    projected_total = measured_overhead_gb + projected_resident_q2_gb
     projected_cache = 16 - projected_total
-    print(f"    Fixed non-block: {fixed_non_block_gb:.1f} GB")
-    print(f"    Resident blocks (3×Q4): {resident_q2_gb:.1f} GB")
-    print(f"    KV cache: {kv_cache_gb:.2f} GB")
-    print(f"    Metal scratch: {metal_scratch_gb:.1f} GB")
-    print(f"    OS overhead: {os_overhead_gb:.1f} GB")
+    print(f"    Measured consumed (24 GB run): {measured_consumed_gb:.1f} GB")
+    print(f"    Measured resident ({len(resident_indices)} blocks): {measured_resident_gb:.1f} GB")
+    print(f"    Measured overhead (non-block): {measured_overhead_gb:.1f} GB")
+    print(f"    Projected resident (3×Q4): {projected_resident_q2_gb:.1f} GB")
     print(f"    Projected total: {projected_total:.1f} GB")
     print(f"    Projected page cache: {projected_cache:.1f} GB")
     print(f"    16 GB viable: {'YES' if projected_total < 10.5 else 'NO'}")
