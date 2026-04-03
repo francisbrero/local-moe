@@ -143,13 +143,31 @@ def _get_inner_model(model):
 
 
 def _find_hf_cache_path(repo_id: str) -> Path:
-    """Find the local HF cache path for a downloaded model."""
+    """Find the local HF cache path for a downloaded model.
+
+    Uses refs/main to resolve the pinned commit hash deterministically,
+    falling back to most-recently-modified snapshot if refs/main is absent.
+    """
     cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
     slug = "models--" + repo_id.replace("/", "--")
     model_dir = cache_dir / slug
     if not model_dir.exists():
         raise FileNotFoundError(f"Model not found in HF cache: {model_dir}")
-    snapshots = list((model_dir / "snapshots").iterdir())
+
+    # Prefer refs/main for deterministic resolution
+    refs_main = model_dir / "refs" / "main"
+    if refs_main.exists():
+        commit_hash = refs_main.read_text().strip()
+        snapshot = model_dir / "snapshots" / commit_hash
+        if snapshot.exists():
+            return snapshot
+
+    # Fallback: most recently modified snapshot
+    snapshots = sorted(
+        (model_dir / "snapshots").iterdir(),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not snapshots:
         raise FileNotFoundError(f"No snapshots in {model_dir}")
     return snapshots[0]
@@ -841,34 +859,50 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     print(f"  RSS after setup: {rss_after_setup:.0f} MB")
     print(f"  Available after setup: {avail_after_setup:.1f} GB")
 
-    # Step 3: Correctness — per-block reload idempotence
-    print(f"\nStep 3: Correctness checks...")
+    # Step 3: Correctness — per-block assign/evict/reload idempotence
+    print(f"\nStep 3: Correctness checks (assign/evict/reload path)...")
+
+    # Prepare a dummy hidden state for forward-pass comparison
+    dummy_ids = mx.array([[1]])
+    h_dummy = inner.embed_tokens(dummy_ids)
+    mx.eval(h_dummy)
+
     check_blocks = [12, 40, 68]  # early, middle, late
     idempotent = True
     for cb in check_blocks:
         if cb >= n_blocks:
             continue
-        # Load once
+
+        # Load → assign → eval → forward (first pass)
         shard_cache = {}
         tensors1 = load_block_from_safetensors(cb, index, shard_cache)
-        mx.eval(tensors1)
-        evict_block(blocks[cb])
+        assign_block_weights(blocks[cb], cb, tensors1)
+        mx.eval(blocks[cb].parameters())
+        out1 = blocks[cb](h_dummy, None, None)
+        mx.eval(out1)
         del shard_cache
 
-        # Load again
+        # Evict
+        evict_block(blocks[cb])
+
+        # Reload → assign → eval → forward (second pass)
         shard_cache = {}
         tensors2 = load_block_from_safetensors(cb, index, shard_cache)
-        mx.eval(tensors2)
+        assign_block_weights(blocks[cb], cb, tensors2)
+        mx.eval(blocks[cb].parameters())
+        out2 = blocks[cb](h_dummy, None, None)
+        mx.eval(out2)
         del shard_cache
 
-        # Compare
-        for key in tensors1:
-            if key in tensors2:
-                diff = float(mx.max(mx.abs(tensors1[key] - tensors2[key])).item())
-                if diff > 0:
-                    print(f"  Block {cb} {key}: diff={diff} — NOT IDEMPOTENT")
-                    idempotent = False
-        del tensors1, tensors2
+        # Compare forward-pass outputs
+        diff = float(mx.max(mx.abs(out1 - out2)).item())
+        if diff > 0:
+            print(f"  Block {cb}: forward diff={diff:.2e} — NOT IDEMPOTENT")
+            idempotent = False
+        else:
+            print(f"  Block {cb}: forward diff=0 — OK")
+
+        del tensors1, tensors2, out1, out2
         evict_block(blocks[cb])
 
     print(f"  Reload idempotence: {'PASS' if idempotent else 'FAIL'}")
@@ -918,7 +952,8 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     mx.eval(logits)
 
     # Sample first token from prefill
-    next_token = mx.argmax(logits[0, -1, :]).item()
+    prefill_logits = logits[0, -1, :]  # Save for reproducibility check
+    next_token = mx.argmax(prefill_logits).item()
     tokens.append(next_token)
 
     prefill_ms = (time.perf_counter() - t_prefill) * 1000
@@ -1019,10 +1054,15 @@ def run_phase_3(model_id_72b: str, n_tokens: int = 10):
     else:
         logits2 = model.lm_head(h2)
     mx.eval(logits2)
-    next_token2 = mx.argmax(logits2[0, -1, :]).item()
+    logits2_last = logits2[0, -1, :]
+    next_token2 = mx.argmax(logits2_last).item()
     first_generated = tokens[len(tokenizer.encode(prompt))]
-    reproducible = first_generated == next_token2
+
+    # Compare full logits vectors, not just argmax
+    logit_max_diff = float(mx.max(mx.abs(prefill_logits - logits2_last)).item())
+    reproducible = logit_max_diff == 0
     print(f"  Run 1 first token: {first_generated}, Run 2: {next_token2}")
+    print(f"  Logit max diff: {logit_max_diff:.2e}")
     print(f"  Reproducible: {'PASS' if reproducible else 'FAIL'}")
     del kv_cache2
 
