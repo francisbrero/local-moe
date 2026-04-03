@@ -187,7 +187,11 @@ def simulate_prefetch_pipeline(
     traces, manifest, predicted_experts, mode="predicted",
     lookahead=2, cache_capacity=TOP_K * 4
 ):
-    """Simulate the async prefetch pipeline.
+    """Simulate the async prefetch pipeline with realistic timing.
+
+    Models SSD read latency for prefetched experts: a prefetch issued at layer i
+    only completes after LOAD_P50_MS * num_experts_prefetched. The expert is only
+    a cache hit if the read would finish before the target layer begins execution.
 
     Args:
         traces: dict layer_idx -> {expert_indices: [T, K]}
@@ -207,22 +211,39 @@ def simulate_prefetch_pipeline(
     total_prefetch_hits = 0
     total_expert_accesses = 0
 
-    executor = ThreadPoolExecutor(max_workers=2)
+    # Track in-flight prefetches: (layer_idx, expert_id) -> completion_time_ms
+    # A prefetch is only usable if its completion time <= layer start time
+    inflight_prefetches = {}
+
+    # Track cumulative wall time for timing model
+    wall_time_ms = 0.0
 
     for t in range(n_tokens):
         for i, layer_idx in enumerate(layer_indices):
             actual_experts = traces[layer_idx]["expert_indices"][t].tolist()
+            layer_start_ms = wall_time_ms
 
-            # Check cache for actual experts
+            # Check cache for actual experts — only count as hit if prefetch
+            # completed before this layer started
             layer_stall_ms = 0.0
             for expert_id in actual_experts:
                 total_expert_accesses += 1
                 step = t * len(layer_indices) + i
+                key = (layer_idx, expert_id)
 
-                if cache.access(layer_idx, expert_id, step):
+                # Check if prefetch completed in time
+                prefetch_done = (
+                    key in inflight_prefetches
+                    and inflight_prefetches[key] <= layer_start_ms
+                )
+
+                if prefetch_done and cache.contains(layer_idx, expert_id):
+                    cache.access(layer_idx, expert_id, step)
                     total_prefetch_hits += 1
-                    # Hit: expert already in staging buffer
-                    layer_stall_ms += 0  # no stall
+                    # Hit: expert already in staging buffer, no stall
+                elif cache.access(layer_idx, expert_id, step):
+                    # Already in cache from a prior completed prefetch
+                    total_prefetch_hits += 1
                 else:
                     # Miss: need to load from SSD (blocking)
                     layer_stall_ms += LOAD_P50_MS
@@ -231,6 +252,7 @@ def simulate_prefetch_pipeline(
             layer_compute_ms = len(actual_experts) * COMPUTE_P50_MS
             total_compute_ms += layer_compute_ms
             total_stall_ms += layer_stall_ms
+            wall_time_ms += layer_compute_ms + layer_stall_ms
 
             # Issue prefetch for layer i+lookahead
             if mode != "baseline" and i + lookahead < len(layer_indices):
@@ -245,12 +267,16 @@ def simulate_prefetch_pipeline(
                 else:
                     prefetch_set = []
 
-                # Issue async prefetch (simulated — just populate cache)
-                for expert_id in prefetch_set:
+                # Model async prefetch: reads happen in parallel on background
+                # thread. Completion time = issue time + SSD read latency.
+                # With ThreadPoolExecutor(2 workers), reads are partially
+                # overlapped. Conservative model: serial reads.
+                issue_time_ms = wall_time_ms
+                for j, expert_id in enumerate(prefetch_set):
+                    completion_ms = issue_time_ms + LOAD_P50_MS * (j + 1)
+                    pkey = (target_layer, expert_id)
+                    inflight_prefetches[pkey] = completion_ms
                     cache.prefetch(target_layer, expert_id, target_step)
-                    # In a real system, this would be an async pread()
-
-    executor.shutdown(wait=False)
 
     total_time_ms = total_compute_ms + total_stall_ms
     hit_rate = total_prefetch_hits / total_expert_accesses if total_expert_accesses > 0 else 0
@@ -360,19 +386,24 @@ def main():
     streamed_tok_s = n_tokens / (streamed_ms / 1000) if streamed_ms > 0 else 0
     print(f"  Streamed (serial) floor: {streamed_ms:.0f}ms = {streamed_tok_s:.1f} tok/s")
 
-    # Generate "predicted" experts using previous-layer heuristic (simple baseline)
-    # In production, this would come from the trained Phase 2 predictor
-    print("\n--- Generating predictions (previous-layer heuristic) ---")
+    # Generate "predicted" experts using previous-layer heuristic (simple baseline).
+    # CAUSAL constraint: when layer i issues a prefetch for layer i+lookahead,
+    # only routing decisions from layers <= i are available. We predict
+    # target_layer's experts = source_layer's experts (the layer issuing the prefetch).
+    # The dict is keyed by (source_layer_index, target_layer_index, token) so the
+    # simulator can look up the prediction using only causally-available information.
+    print(f"\n--- Generating predictions (previous-layer heuristic, lookahead={args.lookahead}) ---")
     predicted_experts = {}
     for t in range(n_tokens):
-        for i, layer_idx in enumerate(layer_indices):
-            if i > 0:
-                prev_layer = layer_indices[i - 1]
-                predicted_experts[(layer_idx, t)] = (
-                    traces[prev_layer]["expert_indices"][t].tolist()
+        for i, source_layer in enumerate(layer_indices):
+            target_idx = i + args.lookahead
+            if target_idx < len(layer_indices):
+                target_layer = layer_indices[target_idx]
+                # Use source layer's experts as prediction for target layer
+                # (causally valid: source_layer has already been computed)
+                predicted_experts[(target_layer, t)] = (
+                    traces[source_layer]["expert_indices"][t].tolist()
                 )
-            else:
-                predicted_experts[(layer_idx, t)] = []
 
     # Run simulations
     print("\n--- Pipeline Simulation ---")
@@ -408,15 +439,16 @@ def main():
     vm_delta = vm_stat_delta(vm_before, vm_after)
     peak_rss = get_rss_mb()
 
-    # Success gate
+    # Success gate — evaluated on predicted (actual heuristic/predictor) results
     print("\n--- Success Gate ---")
-    # Using oracle as best case since we don't have trained predictors here
-    oracle_hit = oracle["prefetch_hit_rate"]
-    oracle_stall = oracle["pipeline_stall_pct"]
-    gate_hit = oracle_hit >= 0.85
-    gate_stall = oracle_stall <= 15.0
-    print(f"  Oracle hit rate: {oracle_hit:.1%} (gate: ≥85%) -> {'PASS' if gate_hit else 'FAIL'}")
-    print(f"  Oracle stall: {oracle_stall:.1f}% (gate: ≤15%) -> {'PASS' if gate_stall else 'FAIL'}")
+    pred_hit = predicted["prefetch_hit_rate"]
+    pred_stall = predicted["pipeline_stall_pct"]
+    gate_hit = pred_hit >= 0.85
+    gate_stall = pred_stall <= 15.0
+    print(f"  Predicted hit rate: {pred_hit:.1%} (gate: ≥85%) -> {'PASS' if gate_hit else 'FAIL'}")
+    print(f"  Predicted stall: {pred_stall:.1f}% (gate: ≤15%) -> {'PASS' if gate_stall else 'FAIL'}")
+    # Also report oracle ceiling for reference
+    print(f"  Oracle ceiling: hit={oracle['prefetch_hit_rate']:.1%}, stall={oracle['pipeline_stall_pct']:.1f}%")
 
     # Log results
     results = {

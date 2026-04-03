@@ -503,6 +503,12 @@ def main():
         pass
 
     TRACE_DIR.mkdir(parents=True, exist_ok=True)
+    # Clear stale traces from prior runs to avoid mixing data
+    stale_files = list(TRACE_DIR.glob("routing_traces_*.npz"))
+    if stale_files:
+        print(f"  Clearing {len(stale_files)} stale trace files from {TRACE_DIR}")
+        for f in stale_files:
+            f.unlink()
     tracer = RoutingTracer(model)
     env = get_environment_info()
 
@@ -592,6 +598,9 @@ def main():
 
     # --- Quality sanity check ---
     print("\n--- Quality Sanity Check ---")
+    # Unconditionally remove any hooks before quality check to ensure
+    # untraced generation is truly untraced (fixes bug when --skip-overhead)
+    tracer.remove_hooks()
     tracer_qc = RoutingTracer(model)
     test_prompt = list(PILOT_PROMPTS.values())[0]
 
