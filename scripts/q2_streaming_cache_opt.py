@@ -1175,26 +1175,26 @@ def _synthetic_madvise_bench(file_path: str, n_runs: int = 3) -> dict:
                 os.close(fd)
                 continue
 
-            if label == "madvise":
-                libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(file_size),
-                             ctypes.c_int(MADV_SEQUENTIAL))
+            try:
+                if label == "madvise":
+                    libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(file_size),
+                                 ctypes.c_int(MADV_SEQUENTIAL))
 
-            # Sequential read: touch every page
-            t0 = time.perf_counter()
-            offset = 0
-            while offset < file_size:
-                chunk = min(buf_size, file_size - offset)
-                # Read by accessing memory (force page faults)
-                ctypes.memmove(
-                    ctypes.create_string_buffer(chunk),
-                    ctypes.c_void_p(addr + offset),
-                    chunk,
-                )
-                offset += chunk
-            elapsed = time.perf_counter() - t0
-
-            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(file_size))
-            os.close(fd)
+                # Sequential read: touch every page
+                t0 = time.perf_counter()
+                offset = 0
+                while offset < file_size:
+                    chunk = min(buf_size, file_size - offset)
+                    ctypes.memmove(
+                        ctypes.create_string_buffer(chunk),
+                        ctypes.c_void_p(addr + offset),
+                        chunk,
+                    )
+                    offset += chunk
+                elapsed = time.perf_counter() - t0
+            finally:
+                libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(file_size))
+                os.close(fd)
 
             throughput = (file_size / (1024**3)) / elapsed if elapsed > 0 else 0
             results[label].append(throughput)
@@ -2020,6 +2020,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
             ballast_ok = False
         elif ballast_gb <= 0:
             print(f"  Available memory already at or below 16 GB equivalent — no ballast needed")
+            ballast_gb = 0
             ballast = (None, None)
             ballast_ok = True
         else:
