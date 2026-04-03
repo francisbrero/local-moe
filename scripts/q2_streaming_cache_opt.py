@@ -82,6 +82,7 @@ libc = ctypes.CDLL("libSystem.B.dylib")
 libc.mmap.restype = ctypes.c_void_p
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 PROT_READ = 1
+MADV_DONTNEED = 4  # macOS: mark pages as not needed, eligible for eviction
 MAP_PRIVATE = 2
 
 
@@ -122,6 +123,28 @@ def measure_file_residency(file_path: str, offset: int = 0, length: int = 0) -> 
             return resident / relevant_pages if relevant_pages > 0 else 0.0
         finally:
             libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(map_length))
+    finally:
+        os.close(fd)
+
+
+def evict_file_from_page_cache(file_path: str):
+    """Evict a file's pages from the OS page cache via madvise(MADV_DONTNEED)."""
+    fd = os.open(file_path, os.O_RDONLY)
+    try:
+        file_size = os.fstat(fd).st_size
+        if file_size == 0:
+            return
+        addr = libc.mmap(
+            None, ctypes.c_size_t(file_size), ctypes.c_int(PROT_READ),
+            ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(0),
+        )
+        if addr == ctypes.c_void_p(-1).value:
+            return
+        try:
+            libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(file_size),
+                         ctypes.c_int(MADV_DONTNEED))
+        finally:
+            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(file_size))
     finally:
         os.close(fd)
 
@@ -1139,7 +1162,8 @@ def _synthetic_madvise_bench(file_path: str, n_runs: int = 3) -> dict:
 
     for label in ["baseline", "madvise"]:
         for _ in range(n_runs):
-            # Drop caches by reading a different pattern first
+            # Evict file pages from OS cache before each sample
+            evict_file_from_page_cache(file_path)
             gc.collect()
 
             fd = os.open(file_path, os.O_RDONLY)
@@ -1357,6 +1381,11 @@ def _run_streaming_pass(
                 evict_block(blocks[i])
                 restore_q4_block_metadata(blocks[i])
 
+        # Join any remaining readahead thread from the last streaming block
+        if readahead_thread is not None:
+            readahead_thread.join(timeout=0.5)
+            readahead_thread = None
+
         h = inner.norm(h)
         if hasattr(model, "args") and model.args.tie_word_embeddings:
             logits = inner.embed_tokens.as_linear(h)
@@ -1468,11 +1497,15 @@ def run_phase_3(model_id: str, n_tokens: int = 20):
     for config_name in configs:
         print(f"\n  Running config: {config_name} ({n_tokens} tokens)...")
 
-        # Re-evict all streaming blocks between configs to ensure fair
-        # page-cache starting state (prevent warmth from prior pass)
+        # Re-evict all streaming blocks and shard pages between configs
+        # to ensure a cold-start page-cache state for each A/B config
         for idx in range(n_blocks):
             if idx not in resident_set:
                 evict_block(blocks[idx])
+        # Evict Q2 shard file pages from OS page cache
+        for shard_file in sorted(os.listdir(q2_cache_dir)):
+            if shard_file.endswith(".safetensors"):
+                evict_file_from_page_cache(str(q2_cache_dir / shard_file))
         gc.collect()
         mx.clear_cache()
 
@@ -2186,10 +2219,13 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
             "text_preview": text[:200],
         }
 
-        # Release ballast
-        del ballast
+        # Release all model-derived references before next config loads
+        del ballast, blocks, inner, kv_cache, q2_index
+        if q4_index is not None:
+            del q4_index
         del model, tokenizer
         gc.collect()
+        mx.clear_cache()
 
     # Summary
     print(f"\n{'='*70}")
