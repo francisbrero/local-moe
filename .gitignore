@@ -25,5 +25,9 @@ node_modules/
 .claude/hooks/.edit-log
 .claude/worktrees/
 
+# Experiment data (large binary traces)
+routing_traces/
+synthetic_experts/
+
 # OS
 .DS_Store
