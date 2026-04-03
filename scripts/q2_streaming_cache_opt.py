@@ -64,12 +64,17 @@ from scripts.safetensors_direct_stream import (
 
 # ── Constants ──
 
-Q2_CACHE_DIR = Path.home() / ".cache" / "local-moe" / "q2-blocks"
+Q2_CACHE_BASE = Path.home() / ".cache" / "local-moe" / "q2-blocks"
 Q2_BITS = 2
 Q2_GROUP_SIZE = 64
 Q4_BITS = 4
 Q4_GROUP_SIZE = 128
 BLOCKS_PER_SHARD = 13  # ~3.4 GB per shard
+
+
+def _q2_cache_dir(model_id: str) -> Path:
+    """Return model-specific Q2 cache directory."""
+    return Q2_CACHE_BASE / model_id.replace("/", "--")
 
 # ── mincore utilities ──
 
@@ -722,6 +727,8 @@ def run_phase_1(model_id: str):
     env = get_environment_info()
     print(f"Model: {model_id}")
 
+    q2_cache_dir = _q2_cache_dir(model_id)
+
     from mlx_lm import load
     model, tokenizer = load(model_id)
     blocks = _get_model_blocks(model)
@@ -734,8 +741,8 @@ def run_phase_1(model_id: str):
     print(f"  Total blocks: {n_blocks}")
     print(f"  Streaming blocks to quantize: {len(streaming_indices)} (indices {n_first}-{n_blocks - n_last - 1})")
 
-    Q2_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"  Output dir: {Q2_CACHE_DIR}")
+    q2_cache_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Output dir: {q2_cache_dir}")
 
     # Process blocks in shard-sized groups
     weight_map = {}
@@ -772,7 +779,7 @@ def run_phase_1(model_id: str):
 
         # Write shard if full
         if blocks_in_shard >= BLOCKS_PER_SHARD or i == len(streaming_indices) - 1:
-            shard_path = Q2_CACHE_DIR / shard_file
+            shard_path = q2_cache_dir / shard_file
             print(f"    Writing shard {shard_idx}: {len(current_shard)} tensors, "
                   f"{sum(v.nbytes for v in current_shard.values()) / (1024**3):.2f} GB")
             write_shard(current_shard, shard_path)
@@ -786,7 +793,7 @@ def run_phase_1(model_id: str):
 
     # Write index
     index_data = {"weight_map": weight_map}
-    with open(Q2_CACHE_DIR / "model.safetensors.index.json", "w") as f:
+    with open(q2_cache_dir / "model.safetensors.index.json", "w") as f:
         json.dump(index_data, f, indent=2)
 
     print(f"\n{'='*70}")
@@ -795,11 +802,11 @@ def run_phase_1(model_id: str):
     print(f"  Total Q2 size: {total_q2_bytes / (1024**3):.2f} GB")
     print(f"  Avg block: {total_q2_bytes / len(streaming_indices) / (1024*1024):.1f} MB")
     print(f"  Shards written: {shard_idx}")
-    print(f"  Index: {Q2_CACHE_DIR / 'model.safetensors.index.json'}")
+    print(f"  Index: {q2_cache_dir / 'model.safetensors.index.json'}")
 
     # Verify: load one block back
     print(f"\n  Verification: loading block {streaming_indices[0]} from Q2 shards...")
-    q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+    q2_index = Q2BlockIndex(q2_cache_dir)
     shard_cache = {}
     test_tensors = load_q2_block(streaming_indices[0], q2_index, shard_cache)
     assign_q2_block_weights(blocks[streaming_indices[0]], streaming_indices[0], test_tensors)
@@ -859,6 +866,8 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
     print(f"Environment: {env['chip']}, {env['memory_gb']} GB RAM, {available_idle:.1f} GB available")
     print(f"Model: {model_id}")
 
+    q2_cache_dir = _q2_cache_dir(model_id)
+
     from mlx_lm import load
     from mlx_lm.models.cache import make_prompt_cache
 
@@ -872,7 +881,7 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
     n_blocks = len(blocks)
 
     # Load Q2 index
-    q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+    q2_index = Q2BlockIndex(q2_cache_dir)
 
     n_first = 8
     n_last = 8
@@ -1207,17 +1216,16 @@ def _prefault_shard_range(file_path: str, offset: int, length: int):
 
 
 def _readahead_next_block(block_idx: int, q2_index: Q2BlockIndex):
-    """Issue pread() calls on the next block's shard ranges in a background thread."""
+    """Issue pread() calls on the next block's actual byte ranges in a background thread."""
     if not q2_index.has_block(block_idx):
         return
-    for shard_file in q2_index.block_shards(block_idx):
+    for shard_file, (offset, length) in q2_index.block_byte_range(block_idx).items():
         shard_path = str(q2_index.shard_path(shard_file))
         if os.path.exists(shard_path):
-            file_size = os.path.getsize(shard_path)
-            # Read first 64KB to prime the readahead
+            # Read up to 1 MB of the block's actual byte range to prime readahead
             fd = os.open(shard_path, os.O_RDONLY)
             try:
-                os.pread(fd, 65536, 0)
+                os.pread(fd, min(length, 1 << 20), offset)
             finally:
                 os.close(fd)
 
@@ -1391,15 +1399,17 @@ def run_phase_3(model_id: str, n_tokens: int = 20):
     print(f"Environment: {env['chip']}, {env['memory_gb']} GB RAM")
     print(f"Model: {model_id}")
 
+    q2_cache_dir = _q2_cache_dir(model_id)
+
     # Step 1: Synthetic madvise benchmark
     print(f"\nStep 1: Synthetic madvise benchmark...")
     # Find a Q2 shard to use as test file
-    q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+    q2_index = Q2BlockIndex(q2_cache_dir)
     # Pick first shard
     test_shard = None
-    for shard_file in sorted(os.listdir(Q2_CACHE_DIR)):
+    for shard_file in sorted(os.listdir(q2_cache_dir)):
         if shard_file.endswith(".safetensors"):
-            test_shard = str(Q2_CACHE_DIR / shard_file)
+            test_shard = str(q2_cache_dir / shard_file)
             break
 
     madvise_skip = False
@@ -1457,6 +1467,15 @@ def run_phase_3(model_id: str, n_tokens: int = 20):
 
     for config_name in configs:
         print(f"\n  Running config: {config_name} ({n_tokens} tokens)...")
+
+        # Re-evict all streaming blocks between configs to ensure fair
+        # page-cache starting state (prevent warmth from prior pass)
+        for idx in range(n_blocks):
+            if idx not in resident_set:
+                evict_block(blocks[idx])
+        gc.collect()
+        mx.clear_cache()
+
         vm_before = get_vm_stat()
 
         pass_result = _run_streaming_pass(
@@ -1753,7 +1772,8 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
 
     # Q2 streaming: generate with Q2 blocks
     print(f"\n  Generating Q2-streaming ({n_tokens} tokens)...")
-    q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+    q2_cache_dir = _q2_cache_dir(model_id_72b)
+    q2_index = Q2BlockIndex(q2_cache_dir)
 
     kv_q2 = make_prompt_cache(model_72b)
     input_ids = mx.array([prompt_tokens])
@@ -1890,6 +1910,8 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
     print(f"  Available (idle): {available_idle:.1f} GB")
     print(f"  OS overhead: {os_overhead:.1f} GB")
 
+    q2_cache_dir = _q2_cache_dir(model_id)
+
     from mlx_lm import load
     from mlx_lm.models.cache import make_prompt_cache
 
@@ -1978,7 +2000,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                 print(f"  WARNING: Ballast verification failed — simulation may be unreliable")
 
         # Load Q2 index
-        q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+        q2_index = Q2BlockIndex(q2_cache_dir)
 
         # For all-Q2 config, we need Q2 blocks for ALL layers (not just 8-71)
         # Check if Q2 index has the needed blocks
@@ -2071,7 +2093,6 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                     restore_q4_block_metadata(blocks[i])
                 else:
                     t_block = time.perf_counter()
-                    q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id))
                     shard_cache = {}
                     q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
                     assign_block_weights(blocks[i], i, q4_tensors)
