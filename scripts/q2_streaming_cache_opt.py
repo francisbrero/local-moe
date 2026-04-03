@@ -1170,24 +1170,29 @@ def _synthetic_madvise_bench(file_path: str, n_runs: int = 3) -> dict:
 
 def _prefault_shard_range(file_path: str, offset: int, length: int):
     """Pre-fault a byte range into page cache via a sidecar mmap read."""
+    # macOS requires page-aligned offset for mmap
+    aligned_offset = (offset // PAGE_SIZE) * PAGE_SIZE
+    align_delta = offset - aligned_offset
+    map_length = length + align_delta
+
     fd = os.open(file_path, os.O_RDONLY)
     try:
         addr = libc.mmap(
-            None, ctypes.c_size_t(length), ctypes.c_int(PROT_READ),
-            ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(offset),
+            None, ctypes.c_size_t(map_length), ctypes.c_int(PROT_READ),
+            ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(aligned_offset),
         )
         if addr == ctypes.c_void_p(-1).value:
             return
         try:
-            # Touch every page to bring it into cache
+            # Touch every page in the target range to bring it into cache
             page_step = PAGE_SIZE * 16  # stride by 16 pages for speed
-            pos = 0
+            pos = align_delta  # start at actual data offset within mapping
             dummy = ctypes.c_char()
-            while pos < length:
+            while pos < map_length:
                 ctypes.memmove(ctypes.byref(dummy), ctypes.c_void_p(addr + pos), 1)
                 pos += page_step
         finally:
-            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(length))
+            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(map_length))
     finally:
         os.close(fd)
 
@@ -1209,12 +1214,12 @@ def _readahead_next_block(block_idx: int, q2_index: Q2BlockIndex):
 
 
 def _measure_block_residency_before_load(block_idx: int, q2_index: Q2BlockIndex) -> float:
-    """Measure page cache residency for a block's shard files before loading."""
+    """Measure page cache residency for a block's byte range before loading."""
     residencies = []
-    for shard_file in q2_index.block_shards(block_idx):
+    for shard_file, (offset, length) in q2_index.block_byte_range(block_idx).items():
         shard_path = str(q2_index.shard_path(shard_file))
         if os.path.exists(shard_path):
-            r = measure_file_residency(shard_path)
+            r = measure_file_residency(shard_path, offset=offset, length=length)
             residencies.append(r)
     return float(np.mean(residencies)) if residencies else 0.0
 
@@ -1767,7 +1772,9 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
     # Seed with Q4's first token (not Q2's own argmax) for proper teacher forcing
     q2_tokens.append(q4_ref_tokens[0])
 
-    for tok_i in range(min(n_tokens - 1, len(q4_ref_tokens))):
+    # tok_i+1 because we've already fed q4_ref_tokens[0] as seed;
+    # logits predict position tok_i+1, so score against q4_ref_tokens[tok_i+1]
+    for tok_i in range(min(n_tokens - 1, len(q4_ref_tokens) - 1)):
         next_ids = mx.array([[q2_tokens[-1]]])
         h = inner_72b.embed_tokens(next_ids)
         for i, layer in enumerate(inner_72b.layers):
@@ -1790,9 +1797,9 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
             logits = model_72b.lm_head(h)
         mx.eval(logits)
 
-        # Score against Q4 reference token (teacher forcing)
+        # Score against Q4 reference token at the NEXT position
         log_probs = mx.log_softmax(logits[0, -1, :])
-        ref_token = q4_ref_tokens[tok_i]
+        ref_token = q4_ref_tokens[tok_i + 1]
         nll = -log_probs[ref_token].item()
         q2_nlls.append(nll)
         # Feed Q4 reference token for teacher forcing
@@ -1805,24 +1812,16 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
     print(f"  NLL delta (Q2 - Q4): {nll_delta_4b:.4f}")
     print(f"  Q2 generated (teacher-forced): '{q2_text[:150]}'")
 
-    # KL divergence on first 5 tokens (already computed — compare logit distributions)
     gate_4b = abs(nll_delta_4b) < 0.5
     print(f"\n  Gate 4b (|NLL delta| < 0.5): {'PASS' if gate_4b else 'FAIL'}")
+    # Note: coherence check removed — teacher-forced text is always Q4 reference
+    # tokens, so coherence is guaranteed. Use NLL delta as the sole quality gate.
 
-    # Coherence check
-    words = q2_text.split()
-    coherent = True
-    if len(words) >= 4:
-        repeated = sum(1 for j in range(1, len(words)) if words[j] == words[j-1])
-        coherent = repeated / len(words) < 0.5
-    print(f"  Coherence check: {'PASS' if coherent else 'FAIL'}")
-
-    overall = gate_4a and gate_4b and coherent
+    overall = gate_4a and gate_4b
     print(f"\n{'='*70}")
     print(f"Phase 4 Overall: {'PASS' if overall else 'FAIL'}")
     print(f"  4a (7B PPL delta < 1.0): {'PASS' if gate_4a else 'FAIL'} ({ppl_delta_4a:.4f})")
     print(f"  4b (72B NLL delta < 0.5): {'PASS' if gate_4b else 'FAIL'} ({nll_delta_4b:.4f})")
-    print(f"  Coherence: {'PASS' if coherent else 'FAIL'}")
 
     log_experiment(
         experiment_name="h8b_q2_streaming",
@@ -1846,7 +1845,6 @@ def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
                 "q4_mean_nll": round(q4_mean_nll, 4),
                 "q2_mean_nll": round(q2_mean_nll, 4),
                 "nll_delta": round(nll_delta_4b, 4),
-                "coherent": coherent,
                 "q4_text_preview": q4_text[:200],
                 "q2_text_preview": q2_text[:200],
                 "gate_pass": gate_4b,
@@ -2019,6 +2017,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                 h = layer(h, mask, kv_cache[i])
                 mx.eval(h, kv_cache[i].state)
                 evict_block(blocks[i])
+                restore_q4_block_metadata(blocks[i])
 
         h = inner.norm(h)
         if hasattr(model, "args") and model.args.tie_word_embeddings:
@@ -2068,6 +2067,7 @@ def run_phase_5(model_id: str, n_tokens: int = 20):
                     h = layer(h, None, kv_cache[i])
                     mx.eval(h, kv_cache[i].state)
                     evict_block(blocks[i])
+                    restore_q4_block_metadata(blocks[i])
 
             h = inner.norm(h)
             if hasattr(model, "args") and model.args.tie_word_embeddings:
