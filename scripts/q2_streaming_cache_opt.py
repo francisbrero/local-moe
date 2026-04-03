@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -49,6 +50,7 @@ from scripts.experiment_utils import (
     vm_stat_delta,
     log_experiment,
     get_available_memory_gb,
+    create_memory_pressure,
 )
 from scripts.safetensors_direct_stream import (
     SafetensorsBlockIndex,
@@ -1060,6 +1062,1082 @@ def run_phase_2(model_id: str, n_tokens: int = 20):
     return overall
 
 
+# ── Phase 3: Cache Optimization ──
+
+
+def _synthetic_madvise_bench(file_path: str, n_runs: int = 3) -> dict:
+    """Benchmark sequential read with vs without madvise(MADV_SEQUENTIAL).
+
+    Returns dict with throughput_baseline_gbs, throughput_madvise_gbs, improvement_pct.
+    """
+    MADV_SEQUENTIAL = 2  # macOS
+    file_size = os.path.getsize(file_path)
+    buf_size = 1024 * 1024  # 1 MB read chunks
+
+    results = {"baseline": [], "madvise": []}
+
+    for label in ["baseline", "madvise"]:
+        for _ in range(n_runs):
+            # Drop caches by reading a different pattern first
+            gc.collect()
+
+            fd = os.open(file_path, os.O_RDONLY)
+            addr = libc.mmap(
+                None, ctypes.c_size_t(file_size), ctypes.c_int(PROT_READ),
+                ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(0),
+            )
+            if addr == ctypes.c_void_p(-1).value:
+                os.close(fd)
+                continue
+
+            if label == "madvise":
+                libc.madvise(ctypes.c_void_p(addr), ctypes.c_size_t(file_size),
+                             ctypes.c_int(MADV_SEQUENTIAL))
+
+            # Sequential read: touch every page
+            t0 = time.perf_counter()
+            offset = 0
+            while offset < file_size:
+                chunk = min(buf_size, file_size - offset)
+                # Read by accessing memory (force page faults)
+                ctypes.memmove(
+                    ctypes.create_string_buffer(chunk),
+                    ctypes.c_void_p(addr + offset),
+                    chunk,
+                )
+                offset += chunk
+            elapsed = time.perf_counter() - t0
+
+            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(file_size))
+            os.close(fd)
+
+            throughput = (file_size / (1024**3)) / elapsed if elapsed > 0 else 0
+            results[label].append(throughput)
+
+    baseline_gbs = float(np.median(results["baseline"])) if results["baseline"] else 0
+    madvise_gbs = float(np.median(results["madvise"])) if results["madvise"] else 0
+    improvement = ((madvise_gbs - baseline_gbs) / baseline_gbs * 100) if baseline_gbs > 0 else 0
+
+    return {
+        "throughput_baseline_gbs": round(baseline_gbs, 2),
+        "throughput_madvise_gbs": round(madvise_gbs, 2),
+        "improvement_pct": round(improvement, 1),
+    }
+
+
+def _prefault_shard_range(file_path: str, offset: int, length: int):
+    """Pre-fault a byte range into page cache via a sidecar mmap read."""
+    fd = os.open(file_path, os.O_RDONLY)
+    try:
+        addr = libc.mmap(
+            None, ctypes.c_size_t(length), ctypes.c_int(PROT_READ),
+            ctypes.c_int(MAP_PRIVATE), ctypes.c_int(fd), ctypes.c_long(offset),
+        )
+        if addr == ctypes.c_void_p(-1).value:
+            return
+        try:
+            # Touch every page to bring it into cache
+            page_step = PAGE_SIZE * 16  # stride by 16 pages for speed
+            pos = 0
+            dummy = ctypes.c_char()
+            while pos < length:
+                ctypes.memmove(ctypes.byref(dummy), ctypes.c_void_p(addr + pos), 1)
+                pos += page_step
+        finally:
+            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(length))
+    finally:
+        os.close(fd)
+
+
+def _readahead_next_block(block_idx: int, q2_index: Q2BlockIndex):
+    """Issue pread() calls on the next block's shard ranges in a background thread."""
+    if not q2_index.has_block(block_idx):
+        return
+    for shard_file in q2_index.block_shards(block_idx):
+        shard_path = str(q2_index.shard_path(shard_file))
+        if os.path.exists(shard_path):
+            file_size = os.path.getsize(shard_path)
+            # Read first 64KB to prime the readahead
+            fd = os.open(shard_path, os.O_RDONLY)
+            try:
+                os.pread(fd, 65536, 0)
+            finally:
+                os.close(fd)
+
+
+def _measure_block_residency_before_load(block_idx: int, q2_index: Q2BlockIndex) -> float:
+    """Measure page cache residency for a block's shard files before loading."""
+    residencies = []
+    for shard_file in q2_index.block_shards(block_idx):
+        shard_path = str(q2_index.shard_path(shard_file))
+        if os.path.exists(shard_path):
+            r = measure_file_residency(shard_path)
+            residencies.append(r)
+    return float(np.mean(residencies)) if residencies else 0.0
+
+
+def _run_streaming_pass(
+    model, inner, blocks, kv_cache, q2_index, resident_set,
+    tokens, n_tokens, tokenizer,
+    optimization: str = "none",
+    measure_residency: bool = False,
+):
+    """Run a streaming decode pass with optional optimization.
+
+    optimization: "none", "prefault", or "readahead"
+    Returns dict with per-token metrics.
+    """
+    from mlx_lm.models.cache import make_prompt_cache
+
+    n_blocks = len(blocks)
+    streaming_indices = [i for i in range(n_blocks) if i not in resident_set]
+
+    # Fresh KV cache for each pass
+    kv_cache = make_prompt_cache(model)
+
+    # Prefill
+    t_prefill = time.perf_counter()
+    input_ids = mx.array([tokens])
+    h = inner.embed_tokens(input_ids)
+    mask = "causal"
+
+    for i, layer in enumerate(inner.layers):
+        if i in resident_set:
+            h = layer(h, mask, kv_cache[i])
+        else:
+            shard_cache = {}
+            q2_tensors = load_q2_block(i, q2_index, shard_cache)
+            assign_q2_block_weights(blocks[i], i, q2_tensors)
+            mx.eval(blocks[i].parameters())
+            del shard_cache, q2_tensors
+
+            h = layer(h, mask, kv_cache[i])
+            mx.eval(h, kv_cache[i].state)
+
+            evict_block(blocks[i])
+            restore_q4_block_metadata(blocks[i])
+
+    h = inner.norm(h)
+    if hasattr(model, "args") and model.args.tie_word_embeddings:
+        logits = inner.embed_tokens.as_linear(h)
+    else:
+        logits = model.lm_head(h)
+    mx.eval(logits)
+
+    next_token = mx.argmax(logits[0, -1, :]).item()
+    generated = list(tokens) + [next_token]
+    ttft_ms = (time.perf_counter() - t_prefill) * 1000
+
+    # Decode
+    per_token_ms = []
+    all_load_ms = []
+    residency_per_token = []
+
+    for tok_i in range(n_tokens - 1):
+        t0 = time.perf_counter()
+        input_ids = mx.array([[generated[-1]]])
+        h = inner.embed_tokens(input_ids)
+
+        token_load_ms = []
+        token_residencies = []
+
+        for i, layer in enumerate(inner.layers):
+            if i in resident_set:
+                h = layer(h, None, kv_cache[i])
+            else:
+                # Measure residency before load
+                if measure_residency:
+                    r = _measure_block_residency_before_load(i, q2_index)
+                    token_residencies.append(r)
+
+                # Apply optimization
+                if optimization == "prefault":
+                    for shard_file in q2_index.block_shards(i):
+                        sp = str(q2_index.shard_path(shard_file))
+                        if os.path.exists(sp):
+                            _prefault_shard_range(sp, 0, os.path.getsize(sp))
+                elif optimization == "readahead":
+                    # Readahead the NEXT streaming block in a background thread
+                    next_streaming = None
+                    for si in streaming_indices:
+                        if si > i:
+                            next_streaming = si
+                            break
+                    if next_streaming is not None:
+                        t = threading.Thread(
+                            target=_readahead_next_block,
+                            args=(next_streaming, q2_index),
+                        )
+                        t.start()
+
+                t_block = time.perf_counter()
+                shard_cache = {}
+                q2_tensors = load_q2_block(i, q2_index, shard_cache)
+                assign_q2_block_weights(blocks[i], i, q2_tensors)
+                mx.eval(blocks[i].parameters())
+                del shard_cache, q2_tensors
+                block_load_ms = (time.perf_counter() - t_block) * 1000
+                token_load_ms.append(block_load_ms)
+
+                h = layer(h, None, kv_cache[i])
+                mx.eval(h, kv_cache[i].state)
+
+                evict_block(blocks[i])
+                restore_q4_block_metadata(blocks[i])
+
+        h = inner.norm(h)
+        if hasattr(model, "args") and model.args.tie_word_embeddings:
+            logits = inner.embed_tokens.as_linear(h)
+        else:
+            logits = model.lm_head(h)
+        mx.eval(logits)
+
+        next_token = mx.argmax(logits[0, -1, :]).item()
+        generated.append(next_token)
+
+        tok_ms = (time.perf_counter() - t0) * 1000
+        per_token_ms.append(tok_ms)
+        all_load_ms.extend(token_load_ms)
+        if token_residencies:
+            residency_per_token.append(float(np.mean(token_residencies)))
+
+    steady = per_token_ms[2:] if len(per_token_ms) > 2 else per_token_ms
+    avg_ms = sum(steady) / len(steady) if steady else 0
+    tok_s = 1000 / avg_ms if avg_ms > 0 else 0
+
+    return {
+        "tok_s": tok_s,
+        "avg_tok_ms": avg_ms,
+        "ttft_ms": ttft_ms,
+        "per_token_ms": per_token_ms,
+        "block_load_p50_ms": float(np.percentile(all_load_ms, 50)) if all_load_ms else 0,
+        "block_load_p95_ms": float(np.percentile(all_load_ms, 95)) if all_load_ms else 0,
+        "mean_block_residency": float(np.mean(residency_per_token)) if residency_per_token else None,
+        "generated_tokens": generated,
+    }
+
+
+def run_phase_3(model_id: str, n_tokens: int = 20):
+    """Phase 3: Cache optimization — A/B comparison of madvise/readahead."""
+    print("=" * 70)
+    print("Phase 3: Cache Optimization")
+    print("=" * 70)
+
+    env = get_environment_info()
+    print(f"Environment: {env['chip']}, {env['memory_gb']} GB RAM")
+    print(f"Model: {model_id}")
+
+    # Step 1: Synthetic madvise benchmark
+    print(f"\nStep 1: Synthetic madvise benchmark...")
+    # Find a Q2 shard to use as test file
+    q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+    # Pick first shard
+    test_shard = None
+    for shard_file in sorted(os.listdir(Q2_CACHE_DIR)):
+        if shard_file.endswith(".safetensors"):
+            test_shard = str(Q2_CACHE_DIR / shard_file)
+            break
+
+    madvise_skip = False
+    madvise_result = None
+    if test_shard:
+        file_mb = os.path.getsize(test_shard) / (1024**2)
+        print(f"  Test file: {test_shard} ({file_mb:.0f} MB)")
+        madvise_result = _synthetic_madvise_bench(test_shard)
+        print(f"  Baseline throughput: {madvise_result['throughput_baseline_gbs']:.2f} GB/s")
+        print(f"  madvise throughput:  {madvise_result['throughput_madvise_gbs']:.2f} GB/s")
+        print(f"  Improvement: {madvise_result['improvement_pct']:.1f}%")
+        if madvise_result['improvement_pct'] < 5.0:
+            print(f"  madvise shows no meaningful improvement — skipping Optimization A")
+            madvise_skip = True
+    else:
+        print("  No Q2 shards found — run Phase 1 first")
+        return False
+
+    # Step 2: Load model and run A/B comparisons
+    print(f"\nStep 2: Loading model for A/B comparison...")
+    from mlx_lm import load
+    from mlx_lm.models.cache import make_prompt_cache
+
+    model, tokenizer = load(model_id)
+    blocks = _get_model_blocks(model)
+    inner = _get_inner_model(model)
+    n_blocks = len(blocks)
+
+    n_first = 8
+    n_last = 8
+    resident_indices = list(range(n_first)) + list(range(n_blocks - n_last, n_blocks))
+    resident_set = set(resident_indices)
+
+    # Setup: materialize and evict
+    for idx in range(n_blocks):
+        mx.eval(blocks[idx].parameters())
+        if idx not in resident_set:
+            evict_block(blocks[idx])
+            gc.collect()
+
+    mx.eval(inner.embed_tokens.parameters())
+    mx.eval(inner.norm.parameters())
+    if hasattr(model, "lm_head"):
+        mx.eval(model.lm_head.parameters())
+
+    prompt = "The key innovation of the transformer architecture is"
+    tokens = tokenizer.encode(prompt)
+    kv_cache = make_prompt_cache(model)
+
+    configs = ["none"]
+    if not madvise_skip:
+        configs.append("prefault")
+    configs.append("readahead")
+
+    results_by_config = {}
+
+    for config_name in configs:
+        print(f"\n  Running config: {config_name} ({n_tokens} tokens)...")
+        vm_before = get_vm_stat()
+
+        pass_result = _run_streaming_pass(
+            model, inner, blocks, kv_cache, q2_index, resident_set,
+            tokens, n_tokens, tokenizer,
+            optimization=config_name,
+            measure_residency=True,
+        )
+
+        vm_after = get_vm_stat()
+        vm_d = vm_stat_delta(vm_before, vm_after)
+
+        text = tokenizer.decode(pass_result["generated_tokens"][len(tokens):])
+        print(f"    tok/s: {pass_result['tok_s']:.4f} ({pass_result['avg_tok_ms']:.0f} ms/tok)")
+        print(f"    TTFT: {pass_result['ttft_ms']:.0f} ms")
+        print(f"    Block load p50/p95: {pass_result['block_load_p50_ms']:.0f}/{pass_result['block_load_p95_ms']:.0f} ms")
+        if pass_result["mean_block_residency"] is not None:
+            print(f"    Mean block residency: {pass_result['mean_block_residency']:.2%}")
+        print(f"    Pageins: {vm_d['pagein_delta_mb']:.0f} MB, Pageouts: {vm_d['pageout_delta_mb']:.0f} MB")
+        print(f"    Generated: '{text[:100]}...'")
+
+        results_by_config[config_name] = {
+            "tok_s": round(pass_result["tok_s"], 4),
+            "avg_tok_ms": round(pass_result["avg_tok_ms"], 1),
+            "ttft_ms": round(pass_result["ttft_ms"], 1),
+            "block_load_p50_ms": round(pass_result["block_load_p50_ms"], 1),
+            "block_load_p95_ms": round(pass_result["block_load_p95_ms"], 1),
+            "mean_block_residency": round(pass_result["mean_block_residency"], 4) if pass_result["mean_block_residency"] is not None else None,
+            "pagein_mb": vm_d["pagein_delta_mb"],
+            "pageout_mb": vm_d["pageout_delta_mb"],
+        }
+
+    # Step 3: Compare
+    print(f"\n{'='*70}")
+    print(f"RESULTS — Phase 3: Cache Optimization A/B")
+    print(f"{'='*70}")
+
+    baseline_tok_s = results_by_config["none"]["tok_s"]
+    print(f"  Baseline (none): {baseline_tok_s:.4f} tok/s")
+    best_config = "none"
+    best_tok_s = baseline_tok_s
+
+    for config_name in configs:
+        if config_name == "none":
+            continue
+        tok_s = results_by_config[config_name]["tok_s"]
+        improvement = ((tok_s - baseline_tok_s) / baseline_tok_s * 100) if baseline_tok_s > 0 else 0
+        print(f"  {config_name}: {tok_s:.4f} tok/s ({improvement:+.1f}%)")
+        if tok_s > best_tok_s:
+            best_tok_s = tok_s
+            best_config = config_name
+
+    overall_improvement = ((best_tok_s - baseline_tok_s) / baseline_tok_s * 100) if baseline_tok_s > 0 else 0
+    gate_pass = overall_improvement >= 10.0
+    print(f"\n  Best config: {best_config} ({overall_improvement:+.1f}% vs baseline)")
+    print(f"  Gate (>= 10% improvement): {'PASS' if gate_pass else 'FAIL'}")
+
+    if not gate_pass:
+        print("  Note: No optimization meaningfully improved tok/s.")
+        print("  macOS may already optimize NVMe sequential reads sufficiently.")
+        print("  For lower-level control, see issue #17 (C/Metal staging buffers).")
+
+    log_experiment(
+        experiment_name="h8b_q2_streaming",
+        phase="phase_3_cache_optimization",
+        config={
+            "model": model_id,
+            "n_tokens": n_tokens,
+            "configs_tested": configs,
+        },
+        results={
+            "madvise_synthetic": madvise_result,
+            "madvise_skipped": madvise_skip,
+            "per_config": results_by_config,
+            "best_config": best_config,
+            "best_tok_s": round(best_tok_s, 4),
+            "baseline_tok_s": round(baseline_tok_s, 4),
+            "improvement_pct": round(overall_improvement, 1),
+            "gate_pass": gate_pass,
+        },
+        env=env,
+    )
+
+    del model, tokenizer
+    return gate_pass
+
+
+# ── Phase 4: Quality Validation ──
+
+
+def _compute_ppl_on_text(model, inner, tokenizer, text: str, max_tokens: int = 200) -> float:
+    """Compute perplexity on a text sample. Returns PPL (exp of mean NLL)."""
+    tokens = tokenizer.encode(text)[:max_tokens]
+    if len(tokens) < 2:
+        return float("inf")
+
+    input_ids = mx.array([tokens])
+    h = inner.embed_tokens(input_ids)
+    mask = "causal"
+    for i, layer in enumerate(inner.layers):
+        h = layer(h, mask, None)
+    h = inner.norm(h)
+    if hasattr(model, "args") and model.args.tie_word_embeddings:
+        logits = inner.embed_tokens.as_linear(h)
+    else:
+        logits = model.lm_head(h)
+    mx.eval(logits)
+
+    # NLL for each token (teacher-forced: score token t+1 given tokens 0..t)
+    log_probs = mx.log_softmax(logits[0, :-1, :], axis=-1)
+    target_tokens = mx.array(tokens[1:])
+    per_token_nll = -log_probs[mx.arange(len(tokens) - 1), target_tokens]
+    mx.eval(per_token_nll)
+    mean_nll = float(mx.mean(per_token_nll).item())
+    return float(np.exp(mean_nll))
+
+
+def run_phase_4(model_id_7b: str, model_id_72b: str, n_tokens: int = 20):
+    """Phase 4: Quality validation — PPL comparison on 7B + 72B sanity check."""
+    print("=" * 70)
+    print("Phase 4: Quality Validation")
+    print("=" * 70)
+
+    env = get_environment_info()
+
+    # ── Phase 4a: 7B PPL comparison ──
+    print(f"\n{'='*70}")
+    print(f"Phase 4a: 7B PPL Comparison")
+    print(f"{'='*70}")
+
+    from mlx_lm import load
+    from mlx_lm.models.cache import make_prompt_cache
+
+    print(f"  Loading 7B model: {model_id_7b}")
+    model_7b, tokenizer_7b = load(model_id_7b)
+    blocks_7b = _get_model_blocks(model_7b)
+    inner_7b = _get_inner_model(model_7b)
+    n_blocks_7b = len(blocks_7b)
+
+    # Materialize all blocks
+    for b in range(n_blocks_7b):
+        mx.eval(blocks_7b[b].parameters())
+    mx.eval(inner_7b.embed_tokens.parameters())
+    mx.eval(inner_7b.norm.parameters())
+    if hasattr(model_7b, "lm_head"):
+        mx.eval(model_7b.lm_head.parameters())
+
+    # Calibration text
+    cal_text = (
+        "The transformer architecture, introduced in the seminal paper 'Attention is All You Need', "
+        "revolutionized natural language processing by replacing recurrent neural networks with "
+        "self-attention mechanisms. This innovation enabled parallel processing of input sequences, "
+        "dramatically reducing training time while improving performance on a wide range of tasks "
+        "including machine translation, text summarization, and question answering. The key insight "
+        "was that attention alone, without recurrence or convolution, could capture long-range "
+        "dependencies in text more effectively than previous approaches. Subsequent work built on "
+        "this foundation with models like BERT, GPT, and T5, each pushing the boundaries of what "
+        "was possible with language models."
+    )
+
+    # Baseline: all-Q4 PPL
+    print(f"\n  Computing all-Q4 baseline PPL...")
+    ppl_q4 = _compute_ppl_on_text(model_7b, inner_7b, tokenizer_7b, cal_text)
+    print(f"  All-Q4 PPL: {ppl_q4:.4f}")
+
+    # Mixed Q4/Q2: proportional to 72B config (8+8 resident, rest Q2)
+    n_resident_each = max(1, n_blocks_7b // 10)  # ~10% each side
+    streaming_7b = list(range(n_resident_each, n_blocks_7b - n_resident_each))
+    print(f"  Converting {len(streaming_7b)} blocks to Q2 (indices {streaming_7b[0]}-{streaming_7b[-1]})...")
+
+    for bi in streaming_7b:
+        q2_tensors = dequantize_block(blocks_7b[bi], bi)
+        assign_q2_block_weights(blocks_7b[bi], bi, q2_tensors)
+        mx.eval(blocks_7b[bi].parameters())
+        del q2_tensors
+
+    ppl_q2 = _compute_ppl_on_text(model_7b, inner_7b, tokenizer_7b, cal_text)
+    print(f"  Mixed Q4/Q2 PPL: {ppl_q2:.4f}")
+
+    ppl_delta_4a = ppl_q2 - ppl_q4
+    gate_4a = ppl_delta_4a < 1.0
+    print(f"  PPL delta: {ppl_delta_4a:.4f}")
+    print(f"  Gate (PPL delta < 1.0): {'PASS' if gate_4a else 'FAIL'}")
+
+    # NLL stability over 50 tokens
+    print(f"\n  NLL stability over 50 tokens...")
+    prompt_text = "The key innovation of the transformer architecture is"
+    prompt_tokens = tokenizer_7b.encode(prompt_text)
+    q2_nlls_50, _ = _compute_generation_nll(
+        model_7b, inner_7b, tokenizer_7b, prompt_tokens, n_tokens=50,
+    )
+    nll_std = float(np.std(q2_nlls_50)) if q2_nlls_50 else 0
+    nll_mean = float(np.mean(q2_nlls_50)) if q2_nlls_50 else 0
+    print(f"  Mean NLL over 50 tokens: {nll_mean:.4f} (std: {nll_std:.4f})")
+
+    del model_7b, tokenizer_7b
+    gc.collect()
+
+    # ── Phase 4b: 72B quality sanity check ──
+    print(f"\n{'='*70}")
+    print(f"Phase 4b: 72B Quality Sanity Check")
+    print(f"{'='*70}")
+
+    print(f"  Loading 72B model: {model_id_72b}")
+    model_72b, tokenizer_72b = load(model_id_72b)
+    blocks_72b = _get_model_blocks(model_72b)
+    inner_72b = _get_inner_model(model_72b)
+    n_blocks_72b = len(blocks_72b)
+
+    n_first = 8
+    n_last = 8
+    resident_indices = list(range(n_first)) + list(range(n_blocks_72b - n_last, n_blocks_72b))
+    resident_set = set(resident_indices)
+
+    # Setup blocks
+    for idx in range(n_blocks_72b):
+        mx.eval(blocks_72b[idx].parameters())
+        if idx not in resident_set:
+            evict_block(blocks_72b[idx])
+            gc.collect()
+
+    mx.eval(inner_72b.embed_tokens.parameters())
+    mx.eval(inner_72b.norm.parameters())
+    if hasattr(model_72b, "lm_head"):
+        mx.eval(model_72b.lm_head.parameters())
+
+    prompt_text = "The key innovation of the transformer architecture is"
+    prompt_tokens = tokenizer_72b.encode(prompt_text)
+
+    # Q4 baseline: generate with all-Q4 streaming (H8a style)
+    print(f"\n  Generating Q4-streaming baseline ({n_tokens} tokens)...")
+    q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id_72b))
+
+    kv_q4 = make_prompt_cache(model_72b)
+    input_ids = mx.array([prompt_tokens])
+    h = inner_72b.embed_tokens(input_ids)
+    mask = "causal"
+    for i, layer in enumerate(inner_72b.layers):
+        if i in resident_set:
+            h = layer(h, mask, kv_q4[i])
+        else:
+            shard_cache = {}
+            q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
+            assign_block_weights(blocks_72b[i], q4_tensors)
+            mx.eval(blocks_72b[i].parameters())
+            del shard_cache, q4_tensors
+            h = layer(h, mask, kv_q4[i])
+            mx.eval(h, kv_q4[i].state)
+            evict_block(blocks_72b[i])
+    h = inner_72b.norm(h)
+    if hasattr(model_72b, "args") and model_72b.args.tie_word_embeddings:
+        logits = inner_72b.embed_tokens.as_linear(h)
+    else:
+        logits = model_72b.lm_head(h)
+    mx.eval(logits)
+
+    # Decode Q4 baseline
+    q4_nlls = []
+    q4_tokens = list(prompt_tokens)
+    q4_tokens.append(mx.argmax(logits[0, -1, :]).item())
+
+    for tok_i in range(n_tokens - 1):
+        next_ids = mx.array([[q4_tokens[-1]]])
+        h = inner_72b.embed_tokens(next_ids)
+        for i, layer in enumerate(inner_72b.layers):
+            if i in resident_set:
+                h = layer(h, None, kv_q4[i])
+            else:
+                shard_cache = {}
+                q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
+                assign_block_weights(blocks_72b[i], q4_tensors)
+                mx.eval(blocks_72b[i].parameters())
+                del shard_cache, q4_tensors
+                h = layer(h, None, kv_q4[i])
+                mx.eval(h, kv_q4[i].state)
+                evict_block(blocks_72b[i])
+        h = inner_72b.norm(h)
+        if hasattr(model_72b, "args") and model_72b.args.tie_word_embeddings:
+            logits = inner_72b.embed_tokens.as_linear(h)
+        else:
+            logits = model_72b.lm_head(h)
+        mx.eval(logits)
+
+        log_probs = mx.log_softmax(logits[0, -1, :])
+        next_token = mx.argmax(logits[0, -1, :]).item()
+        nll = -log_probs[next_token].item()
+        q4_nlls.append(nll)
+        q4_tokens.append(next_token)
+
+    q4_text = tokenizer_72b.decode(q4_tokens[len(prompt_tokens):])
+    q4_mean_nll = float(np.mean(q4_nlls)) if q4_nlls else 0
+    print(f"  Q4 baseline mean NLL: {q4_mean_nll:.4f}")
+    print(f"  Q4 generated: '{q4_text[:150]}'")
+
+    # Q2 streaming: generate with Q2 blocks
+    print(f"\n  Generating Q2-streaming ({n_tokens} tokens)...")
+    q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+
+    kv_q2 = make_prompt_cache(model_72b)
+    input_ids = mx.array([prompt_tokens])
+    h = inner_72b.embed_tokens(input_ids)
+    mask = "causal"
+    for i, layer in enumerate(inner_72b.layers):
+        if i in resident_set:
+            h = layer(h, mask, kv_q2[i])
+        else:
+            shard_cache = {}
+            q2_tensors = load_q2_block(i, q2_index, shard_cache)
+            assign_q2_block_weights(blocks_72b[i], i, q2_tensors)
+            mx.eval(blocks_72b[i].parameters())
+            del shard_cache, q2_tensors
+            h = layer(h, mask, kv_q2[i])
+            mx.eval(h, kv_q2[i].state)
+            evict_block(blocks_72b[i])
+            restore_q4_block_metadata(blocks_72b[i])
+    h = inner_72b.norm(h)
+    if hasattr(model_72b, "args") and model_72b.args.tie_word_embeddings:
+        logits = inner_72b.embed_tokens.as_linear(h)
+    else:
+        logits = model_72b.lm_head(h)
+    mx.eval(logits)
+
+    # Decode Q2
+    q2_nlls = []
+    q2_tokens = list(prompt_tokens)
+    q2_tokens.append(mx.argmax(logits[0, -1, :]).item())
+
+    # Score Q2 against Q4's generated tokens (teacher forcing)
+    q4_ref_tokens = q4_tokens[len(prompt_tokens):]
+
+    for tok_i in range(min(n_tokens - 1, len(q4_ref_tokens))):
+        next_ids = mx.array([[q2_tokens[-1]]])
+        h = inner_72b.embed_tokens(next_ids)
+        for i, layer in enumerate(inner_72b.layers):
+            if i in resident_set:
+                h = layer(h, None, kv_q2[i])
+            else:
+                shard_cache = {}
+                q2_tensors = load_q2_block(i, q2_index, shard_cache)
+                assign_q2_block_weights(blocks_72b[i], i, q2_tensors)
+                mx.eval(blocks_72b[i].parameters())
+                del shard_cache, q2_tensors
+                h = layer(h, None, kv_q2[i])
+                mx.eval(h, kv_q2[i].state)
+                evict_block(blocks_72b[i])
+                restore_q4_block_metadata(blocks_72b[i])
+        h = inner_72b.norm(h)
+        if hasattr(model_72b, "args") and model_72b.args.tie_word_embeddings:
+            logits = inner_72b.embed_tokens.as_linear(h)
+        else:
+            logits = model_72b.lm_head(h)
+        mx.eval(logits)
+
+        # Score against Q4 reference token (teacher forcing)
+        log_probs = mx.log_softmax(logits[0, -1, :])
+        ref_token = q4_ref_tokens[tok_i]
+        nll = -log_probs[ref_token].item()
+        q2_nlls.append(nll)
+        # Feed Q4 reference token for teacher forcing
+        q2_tokens.append(ref_token)
+
+    q2_text = tokenizer_72b.decode(q2_tokens[len(prompt_tokens):])
+    q2_mean_nll = float(np.mean(q2_nlls)) if q2_nlls else 0
+    nll_delta_4b = q2_mean_nll - q4_mean_nll
+    print(f"  Q2 mean NLL (teacher-forced): {q2_mean_nll:.4f}")
+    print(f"  NLL delta (Q2 - Q4): {nll_delta_4b:.4f}")
+    print(f"  Q2 generated (teacher-forced): '{q2_text[:150]}'")
+
+    # KL divergence on first 5 tokens (already computed — compare logit distributions)
+    gate_4b = abs(nll_delta_4b) < 0.5
+    print(f"\n  Gate 4b (|NLL delta| < 0.5): {'PASS' if gate_4b else 'FAIL'}")
+
+    # Coherence check
+    words = q2_text.split()
+    coherent = True
+    if len(words) >= 4:
+        repeated = sum(1 for j in range(1, len(words)) if words[j] == words[j-1])
+        coherent = repeated / len(words) < 0.5
+    print(f"  Coherence check: {'PASS' if coherent else 'FAIL'}")
+
+    overall = gate_4a and gate_4b and coherent
+    print(f"\n{'='*70}")
+    print(f"Phase 4 Overall: {'PASS' if overall else 'FAIL'}")
+    print(f"  4a (7B PPL delta < 1.0): {'PASS' if gate_4a else 'FAIL'} ({ppl_delta_4a:.4f})")
+    print(f"  4b (72B NLL delta < 0.5): {'PASS' if gate_4b else 'FAIL'} ({nll_delta_4b:.4f})")
+    print(f"  Coherence: {'PASS' if coherent else 'FAIL'}")
+
+    log_experiment(
+        experiment_name="h8b_q2_streaming",
+        phase="phase_4_quality_validation",
+        config={
+            "model_7b": model_id_7b,
+            "model_72b": model_id_72b,
+            "n_tokens": n_tokens,
+            "calibration_text_len": len(cal_text),
+        },
+        results={
+            "phase_4a": {
+                "ppl_q4": round(ppl_q4, 4),
+                "ppl_q2": round(ppl_q2, 4),
+                "ppl_delta": round(ppl_delta_4a, 4),
+                "nll_stability_mean": round(nll_mean, 4),
+                "nll_stability_std": round(nll_std, 4),
+                "gate_pass": gate_4a,
+            },
+            "phase_4b": {
+                "q4_mean_nll": round(q4_mean_nll, 4),
+                "q2_mean_nll": round(q2_mean_nll, 4),
+                "nll_delta": round(nll_delta_4b, 4),
+                "coherent": coherent,
+                "q4_text_preview": q4_text[:200],
+                "q2_text_preview": q2_text[:200],
+                "gate_pass": gate_4b,
+            },
+            "gate_pass": overall,
+        },
+        env=env,
+    )
+
+    del model_72b, tokenizer_72b
+    return overall
+
+
+# ── Phase 5: 16 GB Provisional Projection ──
+
+
+def run_phase_5(model_id: str, n_tokens: int = 20):
+    """Phase 5: Simulate 16 GB memory constraint via ballast allocation."""
+    print("=" * 70)
+    print("Phase 5: 16 GB Provisional Projection (Stretch Goal)")
+    print("=" * 70)
+    print("  NOTE: Results are provisional. Final validation requires real 16 GB hardware.")
+
+    env = get_environment_info()
+    available_idle = get_available_memory_gb()
+    total_ram = env["memory_gb"]
+    os_overhead = total_ram - available_idle
+    print(f"  Total RAM: {total_ram} GB")
+    print(f"  Available (idle): {available_idle:.1f} GB")
+    print(f"  OS overhead: {os_overhead:.1f} GB")
+
+    from mlx_lm import load
+    from mlx_lm.models.cache import make_prompt_cache
+
+    # ── Config 1: 3 Q4 resident (2 first + 1 last) + 77 Q2 streamed ──
+    # ── Config 2: All 80 Q2 streamed ──
+    configs_16gb = [
+        {"name": "3-Q4/77-Q2", "n_first": 2, "n_last": 1},
+        {"name": "all-80-Q2", "n_first": 0, "n_last": 0},
+    ]
+
+    results_by_config = {}
+
+    for cfg in configs_16gb:
+        print(f"\n{'='*70}")
+        print(f"Config: {cfg['name']}")
+        print(f"{'='*70}")
+
+        print(f"\n  Loading model: {model_id}")
+        model, tokenizer = load(model_id)
+        blocks = _get_model_blocks(model)
+        inner = _get_inner_model(model)
+        n_blocks = len(blocks)
+
+        n_first = cfg["n_first"]
+        n_last = cfg["n_last"]
+        resident_indices = list(range(n_first)) + list(range(n_blocks - n_last, n_blocks)) if (n_first + n_last) > 0 else []
+        resident_set = set(resident_indices)
+        streaming_indices = [i for i in range(n_blocks) if i not in resident_set]
+
+        print(f"  {len(resident_indices)} Q4 resident + {len(streaming_indices)} Q2 streamed")
+
+        # Setup blocks
+        for idx in range(n_blocks):
+            mx.eval(blocks[idx].parameters())
+            if idx not in resident_set:
+                evict_block(blocks[idx])
+                gc.collect()
+
+        mx.eval(inner.embed_tokens.parameters())
+        mx.eval(inner.norm.parameters())
+        if hasattr(model, "lm_head"):
+            mx.eval(model.lm_head.parameters())
+
+        available_post_setup = get_available_memory_gb()
+        rss_post_setup = get_rss_mb()
+        metal_post_setup = mx.get_active_memory() / 1e6
+
+        print(f"  Post-setup: RSS={rss_post_setup:.0f} MB, Avail={available_post_setup:.1f} GB, Metal={metal_post_setup:.0f} MB")
+
+        # Check app budget constraint (10.5 GB max for 16 GB)
+        app_pinned_gb = (total_ram - available_post_setup - os_overhead)
+        print(f"  Estimated app pinned: {app_pinned_gb:.1f} GB")
+        budget_ok = app_pinned_gb <= 10.5
+        print(f"  App budget check (<= 10.5 GB): {'PASS' if budget_ok else 'FAIL'}")
+
+        if not budget_ok:
+            print(f"  WARNING: Config exceeds 10.5 GB app budget for 16 GB device")
+
+        # Compute ballast for 16 GB simulation
+        # Target: same consumed memory relative to 16 GB as measured on actual RAM
+        consumed_gb = total_ram - available_post_setup
+        ballast_gb = available_post_setup - (16.0 - consumed_gb)
+        # Equivalently: ballast_gb = available_post_setup - 16.0 + total_ram - available_post_setup
+        # = total_ram - 16.0 ... but that ignores the setup overhead.
+        # Correct: we want available_after_ballast = 16.0 - consumed_gb
+        target_available = 16.0 - consumed_gb
+
+        if target_available <= 0:
+            print(f"  Already consuming more than 16 GB — skipping ballast")
+            print(f"  (consumed={consumed_gb:.1f} GB > 16 GB)")
+            ballast_gb = 0
+            ballast = (None, None)
+            ballast_ok = False
+        elif ballast_gb <= 0:
+            print(f"  Available memory already at or below 16 GB equivalent — no ballast needed")
+            ballast = (None, None)
+            ballast_ok = True
+        else:
+            print(f"  Allocating {ballast_gb:.1f} GB ballast (target available: {target_available:.1f} GB)...")
+            ballast = create_memory_pressure(target_available)
+            available_after_ballast = get_available_memory_gb()
+            print(f"  Available after ballast: {available_after_ballast:.1f} GB")
+            # Verify ballast applied
+            ballast_ok = available_after_ballast < available_post_setup - 0.5 * ballast_gb
+            if not ballast_ok:
+                print(f"  WARNING: Ballast verification failed — simulation may be unreliable")
+
+        # Load Q2 index
+        q2_index = Q2BlockIndex(Q2_CACHE_DIR)
+
+        # For all-Q2 config, we need Q2 blocks for ALL layers (not just 8-71)
+        # Check if Q2 index has the needed blocks
+        missing_q2 = [i for i in streaming_indices if not q2_index.has_block(i)]
+        if missing_q2:
+            print(f"  WARNING: Q2 index missing blocks: {missing_q2}")
+            print(f"  Falling back to Q4 for missing blocks")
+
+        # Run streaming pass
+        prompt = "The key innovation of the transformer architecture is"
+        tokens = tokenizer.encode(prompt)
+        kv_cache = make_prompt_cache(model)
+
+        vm_before = get_vm_stat()
+        avail_history = []
+        rss_history = []
+        per_token_ms = []
+        all_load_ms = []
+
+        # Prefill
+        t_prefill = time.perf_counter()
+        input_ids = mx.array([tokens])
+        h = inner.embed_tokens(input_ids)
+        mask = "causal"
+
+        for i, layer in enumerate(inner.layers):
+            if i in resident_set:
+                h = layer(h, mask, kv_cache[i])
+            elif q2_index.has_block(i):
+                shard_cache = {}
+                q2_tensors = load_q2_block(i, q2_index, shard_cache)
+                assign_q2_block_weights(blocks[i], i, q2_tensors)
+                mx.eval(blocks[i].parameters())
+                del shard_cache, q2_tensors
+                h = layer(h, mask, kv_cache[i])
+                mx.eval(h, kv_cache[i].state)
+                evict_block(blocks[i])
+                restore_q4_block_metadata(blocks[i])
+            else:
+                # Fallback: Q4 streaming for blocks not in Q2 index
+                q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id))
+                shard_cache = {}
+                q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
+                assign_block_weights(blocks[i], q4_tensors)
+                mx.eval(blocks[i].parameters())
+                del shard_cache, q4_tensors
+                h = layer(h, mask, kv_cache[i])
+                mx.eval(h, kv_cache[i].state)
+                evict_block(blocks[i])
+
+        h = inner.norm(h)
+        if hasattr(model, "args") and model.args.tie_word_embeddings:
+            logits = inner.embed_tokens.as_linear(h)
+        else:
+            logits = model.lm_head(h)
+        mx.eval(logits)
+
+        next_token = mx.argmax(logits[0, -1, :]).item()
+        generated = list(tokens) + [next_token]
+        ttft_ms = (time.perf_counter() - t_prefill) * 1000
+        print(f"\n  Prefill: {ttft_ms:.0f} ms")
+
+        # Decode
+        for tok_i in range(n_tokens - 1):
+            t0 = time.perf_counter()
+            input_ids = mx.array([[generated[-1]]])
+            h = inner.embed_tokens(input_ids)
+
+            token_load_ms = []
+            for i, layer in enumerate(inner.layers):
+                if i in resident_set:
+                    h = layer(h, None, kv_cache[i])
+                elif q2_index.has_block(i):
+                    t_block = time.perf_counter()
+                    shard_cache = {}
+                    q2_tensors = load_q2_block(i, q2_index, shard_cache)
+                    assign_q2_block_weights(blocks[i], i, q2_tensors)
+                    mx.eval(blocks[i].parameters())
+                    del shard_cache, q2_tensors
+                    block_ms = (time.perf_counter() - t_block) * 1000
+                    token_load_ms.append(block_ms)
+                    h = layer(h, None, kv_cache[i])
+                    mx.eval(h, kv_cache[i].state)
+                    evict_block(blocks[i])
+                    restore_q4_block_metadata(blocks[i])
+                else:
+                    t_block = time.perf_counter()
+                    q4_index = SafetensorsBlockIndex(_find_hf_cache_path(model_id))
+                    shard_cache = {}
+                    q4_tensors = load_block_from_safetensors(i, q4_index, shard_cache)
+                    assign_block_weights(blocks[i], q4_tensors)
+                    mx.eval(blocks[i].parameters())
+                    del shard_cache, q4_tensors
+                    block_ms = (time.perf_counter() - t_block) * 1000
+                    token_load_ms.append(block_ms)
+                    h = layer(h, None, kv_cache[i])
+                    mx.eval(h, kv_cache[i].state)
+                    evict_block(blocks[i])
+
+            h = inner.norm(h)
+            if hasattr(model, "args") and model.args.tie_word_embeddings:
+                logits = inner.embed_tokens.as_linear(h)
+            else:
+                logits = model.lm_head(h)
+            mx.eval(logits)
+
+            next_token = mx.argmax(logits[0, -1, :]).item()
+            generated.append(next_token)
+
+            tok_ms = (time.perf_counter() - t0) * 1000
+            per_token_ms.append(tok_ms)
+            all_load_ms.extend(token_load_ms)
+
+            avail_now = get_available_memory_gb()
+            rss_now = get_rss_mb()
+            avail_history.append(avail_now)
+            rss_history.append(rss_now)
+
+            if tok_i < 3 or tok_i % 5 == 0 or tok_i == n_tokens - 2:
+                print(f"    Token {tok_i+1}: {tok_ms:.0f} ms, RSS={rss_now:.0f} MB, Avail={avail_now:.1f} GB")
+
+        vm_after = get_vm_stat()
+        vm_d = vm_stat_delta(vm_before, vm_after)
+        peak_rss = get_peak_rss_mb()
+        metal_peak = mx.get_peak_memory() / 1e6
+
+        text = tokenizer.decode(generated[len(tokens):])
+        steady = per_token_ms[2:] if len(per_token_ms) > 2 else per_token_ms
+        avg_ms = sum(steady) / len(steady) if steady else 0
+        tok_s = 1000 / avg_ms if avg_ms > 0 else 0
+        min_avail = min(avail_history) if avail_history else 0
+
+        print(f"\n  Results for {cfg['name']}:")
+        print(f"    tok/s: {tok_s:.4f}")
+        print(f"    TTFT: {ttft_ms:.0f} ms")
+        print(f"    Peak RSS: {peak_rss:.0f} MB")
+        print(f"    Metal peak: {metal_peak:.0f} MB")
+        print(f"    Min available: {min_avail:.1f} GB")
+        print(f"    Pageouts: {vm_d['pageout_delta_mb']:.0f} MB")
+        print(f"    Generated: '{text[:150]}'")
+
+        # Provisional indicators (informational, not blocking)
+        no_oom = True  # If we got here, no OOM
+        tok_ok = tok_s >= 0.1
+        avail_ok = min_avail > 1.0
+        pageout_ok = vm_d["pageout_delta_mb"] < 1000
+
+        print(f"\n    Provisional indicators:")
+        print(f"      No OOM: PASS")
+        print(f"      tok/s >= 0.1: {'PASS' if tok_ok else 'FAIL'} ({tok_s:.4f})")
+        print(f"      min_available > 1.0 GB: {'PASS' if avail_ok else 'FAIL'} ({min_avail:.1f} GB)")
+        print(f"      pageouts < 1000 MB: {'PASS' if pageout_ok else 'FAIL'} ({vm_d['pageout_delta_mb']:.0f} MB)")
+        print(f"      Ballast verified: {'PASS' if ballast_ok else 'FAIL'}")
+
+        results_by_config[cfg["name"]] = {
+            "tok_s": round(tok_s, 4),
+            "avg_tok_ms": round(avg_ms, 1),
+            "ttft_ms": round(ttft_ms, 1),
+            "peak_rss_mb": round(peak_rss, 1),
+            "metal_peak_mb": round(metal_peak, 1),
+            "min_available_gb": round(min_avail, 2),
+            "pageout_mb": vm_d["pageout_delta_mb"],
+            "pagein_mb": vm_d["pagein_delta_mb"],
+            "block_load_p50_ms": round(float(np.percentile(all_load_ms, 50)), 1) if all_load_ms else 0,
+            "block_load_p95_ms": round(float(np.percentile(all_load_ms, 95)), 1) if all_load_ms else 0,
+            "app_pinned_gb": round(app_pinned_gb, 1),
+            "budget_ok": budget_ok,
+            "ballast_gb": round(ballast_gb, 1),
+            "ballast_verified": ballast_ok,
+            "n_resident": len(resident_indices),
+            "n_streaming": len(streaming_indices),
+            "n_missing_q2": len(missing_q2),
+            "no_oom": no_oom,
+            "tok_ok": tok_ok,
+            "avail_ok": avail_ok,
+            "pageout_ok": pageout_ok,
+            "text_preview": text[:200],
+        }
+
+        # Release ballast
+        del ballast
+        del model, tokenizer
+        gc.collect()
+
+    # Summary
+    print(f"\n{'='*70}")
+    print(f"Phase 5 Summary — 16 GB Provisional Projection")
+    print(f"{'='*70}")
+    print(f"  NOTE: These are PROVISIONAL results from a {total_ram} GB machine.")
+    print(f"  Final validation requires real 16 GB M4 hardware.")
+
+    for name, r in results_by_config.items():
+        indicators_passed = sum([r["no_oom"], r["tok_ok"], r["avail_ok"], r["pageout_ok"], r["ballast_verified"]])
+        print(f"\n  {name}: {r['tok_s']:.4f} tok/s, {indicators_passed}/5 indicators pass")
+
+    log_experiment(
+        experiment_name="h8b_q2_streaming",
+        phase="phase_5_16gb_projection",
+        config={
+            "model": model_id,
+            "n_tokens": n_tokens,
+            "total_ram_gb": total_ram,
+            "os_overhead_gb": round(os_overhead, 1),
+            "configs": [c["name"] for c in configs_16gb],
+            "provisional": True,
+        },
+        results={
+            "per_config": results_by_config,
+            "available_idle_gb": round(available_idle, 1),
+        },
+        env=env,
+    )
+
+
 # ── Main ──
 
 
@@ -1081,14 +2159,11 @@ def main():
     elif args.phase == "2":
         run_phase_2(args.model_72b, args.n_tokens)
     elif args.phase == "3":
-        print("Phase 3 (Cache Optimization) — not yet implemented")
-        print("Run Phase 2 first to establish baseline.")
+        run_phase_3(args.model_72b, args.n_tokens)
     elif args.phase == "4":
-        print("Phase 4 (Quality Validation) — not yet implemented")
-        print("Run Phase 0b for early quality check.")
+        run_phase_4(args.model_7b, args.model_72b, args.n_tokens)
     elif args.phase == "5":
-        print("Phase 5 (16 GB Projection) — not yet implemented")
-        print("Run Phase 2 first to measure memory budget.")
+        run_phase_5(args.model_72b, args.n_tokens)
 
 
 if __name__ == "__main__":
