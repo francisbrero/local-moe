@@ -19,7 +19,6 @@ import struct
 import tempfile
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -229,23 +228,25 @@ def simulate_prefetch_pipeline(
             for expert_id in actual_experts:
                 total_expert_accesses += 1
                 step = t * len(layer_indices) + i
-                key = (layer_idx, expert_id)
+                pkey = (layer_idx, expert_id)
 
-                # Check if prefetch completed in time
-                prefetch_done = (
-                    key in inflight_prefetches
-                    and inflight_prefetches[key] <= layer_start_ms
+                # An expert is a hit only if:
+                # 1. It was prefetched AND the read completed before this layer
+                # 2. It's still in cache (not evicted)
+                in_cache = cache.contains(layer_idx, expert_id)
+                prefetch_complete = (
+                    pkey in inflight_prefetches
+                    and inflight_prefetches[pkey] <= layer_start_ms
                 )
 
-                if prefetch_done and cache.contains(layer_idx, expert_id):
+                if in_cache and prefetch_complete:
                     cache.access(layer_idx, expert_id, step)
                     total_prefetch_hits += 1
-                    # Hit: expert already in staging buffer, no stall
-                elif cache.access(layer_idx, expert_id, step):
-                    # Already in cache from a prior completed prefetch
-                    total_prefetch_hits += 1
+                    # Hit: expert ready in staging buffer, no stall
                 else:
-                    # Miss: need to load from SSD (blocking)
+                    # Miss: prefetch either not issued, not complete, or
+                    # evicted — must load from SSD (blocking)
+                    cache.access(layer_idx, expert_id, step)  # track for eviction
                     layer_stall_ms += LOAD_P50_MS
 
             # Simulate compute time
