@@ -356,18 +356,21 @@ def compute_expert_frequency(traces, num_experts=128):
         return {"error": "no activations"}
 
     freqs = global_counts / total
-    sorted_freqs = np.sort(freqs)[::-1]
-    n = len(sorted_freqs)
+    # Gini formula requires ascending sort
+    sorted_asc = np.sort(freqs)
+    n = len(sorted_asc)
     index = np.arange(1, n + 1)
-    gini = (2 * np.sum(index * sorted_freqs) - (n + 1) * np.sum(sorted_freqs)) / (
-        n * np.sum(sorted_freqs)
+    gini = (2 * np.sum(index * sorted_asc) - (n + 1) * np.sum(sorted_asc)) / (
+        n * np.sum(sorted_asc)
     )
+    # Descending for top-K / bottom-K reporting
+    sorted_desc = sorted_asc[::-1]
     return {
         "gini_coefficient": float(gini),
-        "top_10_share": float(sorted_freqs[:10].sum()),
-        "bottom_50_share": float(sorted_freqs[64:].sum()),
-        "max_freq": float(sorted_freqs[0]),
-        "min_freq": float(sorted_freqs[-1]),
+        "top_10_share": float(sorted_desc[:10].sum()),
+        "bottom_50_share": float(sorted_desc[64:].sum()),
+        "max_freq": float(sorted_desc[0]),
+        "min_freq": float(sorted_desc[-1]),
         "active_experts": int((global_counts > 0).sum()),
         "is_zipf_like": bool(gini > 0.3),
     }

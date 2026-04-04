@@ -304,14 +304,17 @@ def measure_predictor_latency(model, X_sample, n_runs=100):
 
 
 def build_buddy_table(traces, top_n=5):
-    """Build co-activation lookup: for each expert, find top-N buddies.
+    """Build per-layer co-activation lookup: for each expert, find top-N buddies.
 
-    Buddies are experts that most frequently co-activate with a given expert.
+    Buddies are experts that most frequently co-activate with a given expert
+    *within the same layer*. Expert IDs are only meaningful within a single
+    layer, so we keep separate tables per layer.
     Used for BuddyMoE-style substitution on prediction misses.
     """
-    coactivation = np.zeros((NUM_EXPERTS, NUM_EXPERTS), dtype=np.int64)
+    buddy_table = {}
 
     for layer_idx in sorted(traces.keys()):
+        coactivation = np.zeros((NUM_EXPERTS, NUM_EXPERTS), dtype=np.int64)
         indices = traces[layer_idx]["expert_indices"]  # [T, K]
         for t in range(len(indices)):
             experts = indices[t].tolist()
@@ -320,16 +323,17 @@ def build_buddy_table(traces, top_n=5):
                     coactivation[e1, e2] += 1
                     coactivation[e2, e1] += 1
 
-    # For each expert, find top-N co-activating buddies
-    buddy_table = {}
-    for e in range(NUM_EXPERTS):
-        counts = coactivation[e].copy()
-        counts[e] = 0  # exclude self
-        top_buddies = np.argsort(counts)[-top_n:][::-1]
-        buddy_table[e] = {
-            "buddies": top_buddies.tolist(),
-            "counts": counts[top_buddies].tolist(),
-        }
+        # For each expert, find top-N co-activating buddies in this layer
+        layer_table = {}
+        for e in range(NUM_EXPERTS):
+            counts = coactivation[e].copy()
+            counts[e] = 0  # exclude self
+            top_buddies = np.argsort(counts)[-top_n:][::-1]
+            layer_table[e] = {
+                "buddies": top_buddies.tolist(),
+                "counts": counts[top_buddies].tolist(),
+            }
+        buddy_table[layer_idx] = layer_table
 
     return buddy_table
 
@@ -456,10 +460,16 @@ def main():
     # Buddy table
     print("\n--- Co-activation Buddy Table ---")
     buddy_table = build_buddy_table(traces)
-    # Save buddy table
+    n_layers_with_buddies = len(buddy_table)
+    print(f"  Built per-layer buddy tables for {n_layers_with_buddies} layers")
+    # Save buddy table (convert int keys to strings for JSON)
     buddy_path = trace_dir / "buddy_table.json"
+    serializable = {
+        str(layer): {str(e): v for e, v in experts.items()}
+        for layer, experts in buddy_table.items()
+    }
     with open(buddy_path, "w") as f:
-        json.dump(buddy_table, f)
+        json.dump(serializable, f)
     print(f"  Saved to {buddy_path}")
 
     # GPU peak memory

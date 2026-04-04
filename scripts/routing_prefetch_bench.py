@@ -246,8 +246,13 @@ def simulate_prefetch_pipeline(
                 else:
                     # Miss: prefetch either not issued, not complete, or
                     # evicted — must load from SSD (blocking)
-                    cache.access(layer_idx, expert_id, step)  # track for eviction
                     layer_stall_ms += LOAD_P50_MS
+                    # After synchronous load, insert into staging cache so
+                    # subsequent accesses within the same window are hits
+                    cache.prefetch(layer_idx, expert_id, step)
+                    inflight_prefetches[(layer_idx, expert_id)] = (
+                        wall_time_ms + layer_stall_ms
+                    )
 
             # Simulate compute time
             layer_compute_ms = len(actual_experts) * COMPUTE_P50_MS
