@@ -1,8 +1,27 @@
 # H2: Expert Routing Prediction + Prefetch
 
-**Status**: Untested
+**Status**: Tested — negative result on Qwen3-30B-A3B (model-dependent)
 **Analogy**: CPU branch prediction / instruction prefetch
 **Bottleneck addressed**: Memory capacity (SSD latency hiding)
+
+## Experimental Result (H2, April 2026)
+
+**Prediction viability is model-dependent.** Tested on Qwen3-30B-A3B (4-bit, 48 MoE layers, 128 experts, top-K=8):
+
+| Metric | Result | Gate | Status |
+|--------|--------|------|--------|
+| Previous-layer recall | 6.2% | descriptive | Far below 78.8% prior art |
+| Cross-layer Jaccard (L=2) | 0.032 | descriptive | Very low correlation |
+| L=2 recall@8 (trained predictor) | 62.5% | ≥90% | **FAIL** |
+| Oracle prefetch hit rate | 95.8% | ≥85% | PASS |
+| Predicted prefetch hit rate | 5.6% | ≥85% | FAIL |
+| Expert frequency Gini | 0.14 | — | Near-uniform (not Zipf) |
+
+**Key finding**: Qwen3-30B-A3B has near-uniform expert routing (all 128 experts active, Gini=0.14) with very low cross-layer correlation. Prior art (ETH Zurich, Fate) achieving 93-97% recall was measured on models with concentrated/Zipf-like routing (DeepSeek V2, Phi-MoE). The prefetch *mechanism* works (oracle proves it), but routing for this specific model is too unpredictable.
+
+**Recommendation**: Try models with concentrated routing patterns (e.g., DeepSeek V2 Lite). For Qwen3-30B-A3B, focus on other latency-hiding strategies.
+
+See `dev/active/routing-prediction/context.md` for full results.
 
 ## The Insight
 
@@ -30,12 +49,14 @@ If prediction is wrong:
 
 ## Why This Might Work
 
-Expert routing has strong temporal patterns:
+Expert routing has strong temporal patterns **in some models**:
 - The same expert often activates for consecutive tokens
 - Expert activation correlates across nearby layers
 - Certain expert combinations co-occur frequently
 
 Flash MOE observed ~71% OS page cache hit rate, meaning experts are reused. A smart predictor could push this much higher by prefetching before the miss happens.
+
+> **H2 caveat**: These patterns were NOT observed in Qwen3-30B-A3B, which has near-uniform expert usage (temporal locality only 40%, cross-layer Jaccard only 3%). This assumption must be validated per model.
 
 ## Expected Impact
 
@@ -107,11 +128,12 @@ Based on the literature, the most practical combination:
 
 ## Open Questions
 
-1. ~~How accurately can we predict routing 2-3 layers ahead?~~ **Answered: 93-97% with 2 linear layers** (ETH Zurich).
-2. Does Apple Silicon's unified memory controller allow true concurrent SSD DMA + GPU compute? Flash MOE says concurrent access hurts by 73%. But **prefetch to RAM staging buffer** might avoid the contention — PreScope's AsyncIO suggests this works.
-3. ~~What's the right predictor architecture?~~ **Answered: 2-layer linear predictor on pre-attention activations** (ETH Zurich) is the sweet spot of accuracy vs overhead.
+1. ~~How accurately can we predict routing 2-3 layers ahead?~~ **Answered (H2): model-dependent.** Prior art reports 93-97% on DeepSeek V2/Phi-MoE, but Qwen3-30B-A3B only achieves 62.5% recall@8 at L=2 due to near-uniform routing. The predictor architecture (2 linear layers) is sound — the model's routing pattern is the bottleneck.
+2. Does Apple Silicon's unified memory controller allow true concurrent SSD DMA + GPU compute? Flash MOE says concurrent access hurts by 73%. But **prefetch to RAM staging buffer** might avoid the contention — PreScope's AsyncIO suggests this works. **H0 Phase 4a confirmed**: GPU/SSD contention is only 0.2% on M4 Pro (negligible).
+3. ~~What's the right predictor architecture?~~ **Answered: 2-layer linear predictor on pre-attention activations** (ETH Zurich) is the sweet spot of accuracy vs overhead. **H2 confirmed**: predictor latency is only 0.189ms/token — negligible.
 4. Can we combine BuddyMoE substitution with HOBBIT mixed-precision fallback for a two-tier miss handling strategy?
 5. Is the SpecMD "Least-Stale" eviction practical on NVMe (designed for GPU VRAM)?
+6. **NEW (H2)**: Which MoE models have concentrated vs uniform routing? This determines whether prediction-based prefetching is viable. Need to profile routing patterns across model families before committing to this approach.
 
 ## Experiment Plan
 
@@ -132,7 +154,8 @@ Based on the literature, the most practical combination:
 
 ## Risks
 
-- Prediction accuracy may be too low, wasting SSD bandwidth on wrong experts
-- Unified memory contention may negate prefetch benefits (Flash MOE's finding)
-- Predictor overhead (even small MLP) adds latency per layer
+- ~~Prediction accuracy may be too low, wasting SSD bandwidth on wrong experts~~ **Confirmed (H2)**: Qwen3-30B-A3B routing is too uniform for accurate prediction. Model-dependent risk is real.
+- ~~Unified memory contention may negate prefetch benefits (Flash MOE's finding)~~ **Mitigated (H0)**: GPU/SSD contention is only 0.2% on M4 Pro.
+- ~~Predictor overhead (even small MLP) adds latency per layer~~ **Mitigated (H2)**: 0.189ms/token is negligible.
 - RAM staging buffer reduces effective memory for other uses
+- **NEW**: Prior art numbers (93-97% recall) may only apply to models with Zipf-like routing. Must profile routing patterns per model before committing to this approach.
