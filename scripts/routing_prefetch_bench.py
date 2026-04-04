@@ -111,16 +111,15 @@ def load_manifest(corpus_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Staging cache with Least-Stale eviction
+# Staging cache with LRU eviction
 # ---------------------------------------------------------------------------
 
 
-class LeastStaleCache:
-    """Expert staging cache with Least-Stale eviction (SpecMD).
+class LRUExpertCache:
+    """Expert staging cache with LRU eviction.
 
-    Unlike LRU, Least-Stale evicts the expert whose last-predicted-use is
-    furthest in the past — an expert that was predicted but never used is
-    staler than one currently in use.
+    Uses insertion/access-order eviction via OrderedDict. Entries are moved
+    to the end on access or update; eviction removes the oldest entry.
     """
 
     def __init__(self, capacity_experts=TOP_K * 4):
@@ -203,16 +202,19 @@ def simulate_prefetch_pipeline(
     """
     layer_indices = sorted(traces.keys())
     n_tokens = traces[layer_indices[0]]["expert_indices"].shape[0]
-    cache = LeastStaleCache(capacity_experts=cache_capacity)
+    cache = LRUExpertCache(capacity_experts=cache_capacity)
 
     total_compute_ms = 0.0
     total_stall_ms = 0.0
     total_prefetch_hits = 0
+    total_cache_hits = 0  # includes both prefetch and sync-loaded cache hits
     total_expert_accesses = 0
 
     # Track in-flight prefetches: (layer_idx, expert_id) -> completion_time_ms
     # A prefetch is only usable if its completion time <= layer start time
     inflight_prefetches = {}
+    # Track which experts were loaded by prefetch vs sync load
+    prefetched_keys = set()  # keys that were prefetched (not sync-loaded)
 
     # Track cumulative wall time for timing model
     wall_time_ms = 0.0
@@ -241,7 +243,9 @@ def simulate_prefetch_pipeline(
 
                 if in_cache and prefetch_complete:
                     cache.access(layer_idx, expert_id, step)
-                    total_prefetch_hits += 1
+                    total_cache_hits += 1
+                    if pkey in prefetched_keys:
+                        total_prefetch_hits += 1
                     # Hit: expert ready in staging buffer, no stall
                 else:
                     # Miss: prefetch either not issued, not complete, or
@@ -250,9 +254,9 @@ def simulate_prefetch_pipeline(
                     # After synchronous load, insert into staging cache so
                     # subsequent accesses within the same window are hits
                     cache.prefetch(layer_idx, expert_id, step)
-                    inflight_prefetches[(layer_idx, expert_id)] = (
-                        wall_time_ms + layer_stall_ms
-                    )
+                    inflight_prefetches[pkey] = wall_time_ms + layer_stall_ms
+                    # Not counted as prefetched — this was a sync load
+                    prefetched_keys.discard(pkey)
 
             # Simulate compute time
             layer_compute_ms = len(actual_experts) * COMPUTE_P50_MS
@@ -282,10 +286,12 @@ def simulate_prefetch_pipeline(
                     completion_ms = issue_time_ms + LOAD_P50_MS * (j + 1)
                     pkey = (target_layer, expert_id)
                     inflight_prefetches[pkey] = completion_ms
+                    prefetched_keys.add(pkey)
                     cache.prefetch(target_layer, expert_id, target_step)
 
     total_time_ms = total_compute_ms + total_stall_ms
-    hit_rate = total_prefetch_hits / total_expert_accesses if total_expert_accesses > 0 else 0
+    prefetch_hit_rate = total_prefetch_hits / total_expert_accesses if total_expert_accesses > 0 else 0
+    cache_hit_rate = total_cache_hits / total_expert_accesses if total_expert_accesses > 0 else 0
     stall_pct = total_stall_ms / total_time_ms * 100 if total_time_ms > 0 else 0
     tok_s = n_tokens / (total_time_ms / 1000) if total_time_ms > 0 else 0
 
@@ -295,10 +301,10 @@ def simulate_prefetch_pipeline(
         "total_compute_ms": round(total_compute_ms, 2),
         "total_stall_ms": round(total_stall_ms, 2),
         "total_time_ms": round(total_time_ms, 2),
-        "prefetch_hit_rate": round(hit_rate, 4),
+        "prefetch_hit_rate": round(prefetch_hit_rate, 4),
+        "cache_hit_rate": round(cache_hit_rate, 4),
         "pipeline_stall_pct": round(stall_pct, 2),
         "estimated_tok_s": round(tok_s, 2),
-        "cache_hit_rate": round(cache.hit_rate, 4),
         "total_expert_accesses": total_expert_accesses,
     }
 
@@ -310,13 +316,13 @@ def simulate_prefetch_pipeline(
 
 def benchmark_pread_bandwidth(manifest, n_reads=50):
     """Measure actual pread bandwidth on the synthetic corpus."""
-    layer_info = manifest[0]
+    first_layer = next(iter(manifest))
     times = []
 
     for _ in range(n_reads):
         expert_id = np.random.randint(0, NUM_EXPERTS)
         t0 = time.perf_counter()
-        data = pread_expert(manifest, 0, expert_id)
+        data = pread_expert(manifest, first_layer, expert_id)
         elapsed = time.perf_counter() - t0
         times.append(elapsed)
 

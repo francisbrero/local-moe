@@ -279,9 +279,10 @@ def load_all_traces(trace_dir: Path):
             continue
         data = np.load(f)
         for key in data.files:
-            parts = key.split("_")
+            # Keys are "layer_{idx}_{field}" — split at first 2 underscores
+            parts = key.split("_", 2)  # ['layer', '12', 'expert_indices']
             layer_idx = int(parts[1])
-            field = "_".join(parts[2:])
+            field = parts[2]
             if layer_idx not in all_data:
                 all_data[layer_idx] = {"expert_indices": [], "block_input": []}
             all_data[layer_idx][field].append(data[key])
@@ -607,14 +608,16 @@ def main():
     tracer_qc = RoutingTracer(model)
     test_prompt = list(PILOT_PROMPTS.values())[0]
 
-    tracer_qc.remove_hooks()
+    # Run untraced first (no hooks installed on class at this point)
     mx.random.seed(42)
     untraced_out, _ = generate_untraced(model, tokenizer, test_prompt, 50)
 
+    # Run traced (install_hooks called inside generate_traced)
     mx.random.seed(42)
     traced_out, _ = generate_traced(
         model, tokenizer, tracer_qc, test_prompt, 50, "quality_check"
     )
+    # Clean up hooks after quality check
     tracer_qc.remove_hooks()
 
     outputs_match = untraced_out == traced_out

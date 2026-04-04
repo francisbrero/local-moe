@@ -18,6 +18,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from mlx.utils import tree_flatten
 import numpy as np
 
 from experiment_utils import get_environment_info, get_rss_mb, log_experiment
@@ -56,20 +57,29 @@ def load_traces(trace_dir: Path):
         data = np.load(f)
         prompt_id = f.stem.replace("routing_traces_", "")
         n_tokens = None
+        file_layers = set()  # Track layers in this file only
 
         for key in data.files:
-            parts = key.split("_")
+            # Keys are "layer_{idx}_{field}" — split at first 2 underscores
+            parts = key.split("_", 2)  # ['layer', '12', 'expert_indices']
             layer_idx = int(parts[1])
-            field = "_".join(parts[2:])
+            field = parts[2]
             if layer_idx not in all_data:
                 all_data[layer_idx] = {"expert_indices": [], "block_input": []}
             arr = data[key]
             all_data[layer_idx][field].append(arr)
+            file_layers.add(layer_idx)
             if n_tokens is None:
                 n_tokens = arr.shape[0]
+            else:
+                # Validate all layers in this file have same token count
+                assert arr.shape[0] == n_tokens, (
+                    f"Token count mismatch in {f}: {arr.shape[0]} vs {n_tokens}"
+                )
 
         if n_tokens:
-            for layer_idx in all_data:
+            # Only update boundaries for layers present in THIS file
+            for layer_idx in file_layers:
                 if layer_idx not in prompt_boundaries:
                     prompt_boundaries[layer_idx] = []
                 prompt_boundaries[layer_idx].append(
@@ -159,9 +169,9 @@ def expert_indices_to_multihot(indices, num_experts=NUM_EXPERTS):
     """Convert [T, K] expert indices to [T, num_experts] multi-hot vectors."""
     T, K = indices.shape
     multihot = np.zeros((T, num_experts), dtype=np.float32)
-    for t in range(T):
-        for k in range(K):
-            multihot[t, indices[t, k]] = 1.0
+    rows = np.repeat(np.arange(T), K)
+    cols = indices.flatten()
+    multihot[rows, cols] = 1.0
     return multihot
 
 
@@ -210,7 +220,6 @@ def train_predictor(X_train, Y_train, X_val, Y_val, epochs=EPOCHS, lr=LR):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             # Save a deep copy of weights as flat list of (name, array) tuples
-            from mlx.utils import tree_flatten
             best_weights = [(k, mx.array(v)) for k, v in tree_flatten(model.parameters())]
             no_improve = 0
         else:
