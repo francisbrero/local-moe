@@ -129,6 +129,7 @@ def split_by_prompt(traces, prompt_boundaries, train_frac=0.7, val_frac=0.15):
     if not test_idx:
         test_idx = {perm[0]}
         train_idx.discard(perm[0])
+        val_idx.discard(perm[0])
 
     def gather_tokens(layer_idx, indices):
         bounds = prompt_boundaries[layer_idx]

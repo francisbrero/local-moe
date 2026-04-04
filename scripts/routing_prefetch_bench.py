@@ -15,7 +15,6 @@ Usage:
 import argparse
 import json
 import os
-import struct
 import tempfile
 import time
 from collections import OrderedDict
@@ -322,7 +321,7 @@ def benchmark_pread_bandwidth(manifest, n_reads=50):
     for _ in range(n_reads):
         expert_id = np.random.randint(0, NUM_EXPERTS)
         t0 = time.perf_counter()
-        data = pread_expert(manifest, first_layer, expert_id)
+        pread_expert(manifest, first_layer, expert_id)  # read for timing only
         elapsed = time.perf_counter() - t0
         times.append(elapsed)
 
