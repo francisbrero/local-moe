@@ -94,6 +94,17 @@ def load_traces(trace_dir: Path):
             "block_input": np.concatenate(all_data[layer_idx]["block_input"], axis=0),
         }
 
+    # Validate that all layers have the same number of prompt boundaries
+    if prompt_boundaries:
+        first_layer = sorted(prompt_boundaries.keys())[0]
+        expected = len(prompt_boundaries[first_layer])
+        for layer_idx, bounds in prompt_boundaries.items():
+            assert len(bounds) == expected, (
+                f"Layer {layer_idx} has {len(bounds)} prompt boundaries, "
+                f"expected {expected} (from layer {first_layer}). "
+                f"Trace files may be corrupt or missing layers."
+            )
+
     return result, prompt_boundaries
 
 
@@ -194,7 +205,7 @@ def train_predictor(X_train, Y_train, X_val, Y_val, epochs=EPOCHS, lr=LR):
     no_improve = 0
 
     n_train = X_train.shape[0]
-    n_batches = max(1, n_train // BATCH_SIZE)
+    n_batches = max(1, -(-n_train // BATCH_SIZE))  # ceil division
 
     for epoch in range(epochs):
         perm = mx.array(np.random.permutation(n_train))
