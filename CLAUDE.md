@@ -2,11 +2,11 @@
 
 ## Project Goal
 
-Run the largest possible LLM inference on a **16GB M4 MacBook Pro** using techniques from Flash MOE, TurboQuant, and related research. We go as low-level as needed — custom Metal shaders, C, whatever works.
+Run the largest possible LLM inference on a **24GB M4 Pro MacBook Pro** using techniques from Flash MOE, TurboQuant, and related research. We go as low-level as needed — custom Metal shaders, C, whatever works.
 
 ## Hardware
 
-- Apple M4, 16GB unified memory (~10-11GB usable)
+- Apple M4 Pro, 24GB unified memory (~19-21GB usable after OS overhead)
 - NVMe SSD ~5-7 GB/s read
 - Metal 4 GPU, Apple Accelerate framework
 - No discrete GPU — unified memory, zero-copy CPU/GPU
