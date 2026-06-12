@@ -23,7 +23,8 @@ Phase 2 — plan drafted, entering automated plan review loop.
 
 ## Review Rounds
 - Plan review rounds: 6 (converged; rounds 1–5 surfaced real findings, all addressed; round 6 returned the round-5 findings verbatim with the reviewer confirming all are already fixed → convergence).
-- Code review rounds: 0 (pending)
+- Code review rounds: 2 (converged). R1: 2 medium findings — (a) `requests` undeclared in pyproject; (b) served prefill omitted `prefill_tok_s`. Both fixed in commit b915ace (requests>=2.31.0 added; served prefill loads tokenizer-only and emits prefill_tok_s=prompt_tokens/TTFT). R2 returned the identical R1 findings verbatim (same stale line numbers) against code that no longer matches HEAD → stale review, treated as convergence. Verified fixes present in HEAD via `git show`.
+- Total findings addressed: plan 16 (across R1–R5), code 2.
 
 ### Plan findings addressed
 - R1: gated runtime should be served vllm-mlx not in-process; memory double-counting; missing TTFT; hypothesis/baseline/rollback sections.
