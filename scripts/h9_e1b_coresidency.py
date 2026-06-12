@@ -30,13 +30,15 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
+import math
 import os
 import signal
 import statistics
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -47,7 +49,6 @@ from h9_e1_baseline import (  # noqa: E402
     _RUsageInfoV2,
     _RUSAGE_INFO_V2,
     _libc,
-    phys_footprint_bytes,
     served_generate_timed,
     tree_pids,
 )
@@ -55,7 +56,6 @@ from experiment_utils import (  # noqa: E402
     allocate_cpu_ballast,
     allocate_mlx_ballast,
     get_available_memory_gb,
-    get_environment_info,
     get_vm_stat,
     log_experiment,
     vm_stat_delta,
@@ -104,7 +104,7 @@ def _rusage_v2(pid: int) -> Optional[_RUsageInfoV2]:
 def tree_counters(root_pid: int) -> dict:
     """Sum phys_footprint / resident / pageins / diskio_bytesread across the process tree."""
     pf = res = pagein = diskread = 0
-    method = "phys_footprint"
+    fell_back = False
     for pid in tree_pids(root_pid):
         info = _rusage_v2(pid)
         if info is not None:
@@ -114,10 +114,13 @@ def tree_counters(root_pid: int) -> dict:
             diskread += int(info.ri_diskio_bytesread)
         else:
             try:
-                pf += psutil.Process(pid).memory_info().rss
-                method = "rss"
+                rss = psutil.Process(pid).memory_info().rss
+                pf += rss
+                res += rss
+                fell_back = True
             except psutil.Error:
                 pass
+    method = "mixed_rss+phys" if fell_back else "phys_footprint"
     return {
         "phys_footprint_b": pf,
         "resident_b": res,
@@ -213,6 +216,7 @@ def start_server(ngl: int, log_path: Path) -> subprocess.Popen:
     ]
     f = open(log_path, "w")
     proc = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT)
+    proc._log_fh = f  # keep a ref; closed in _kill() to avoid a dangling fd / ResourceWarning
     return proc
 
 
@@ -330,7 +334,6 @@ class DecodeResult:
 
 
 def run(ngl: int, order: str, minutes: float) -> dict:
-    import requests
 
     base_url = f"http://127.0.0.1:{PORT}"
     server_log = LOGDIR / f"server_ngl{ngl}_{order}.log"
@@ -352,7 +355,6 @@ def run(ngl: int, order: str, minutes: float) -> dict:
     load_s = time.perf_counter() - load_t0
 
     if not healthy:
-        status = "load_failed"
         print(f"[run] LOAD FAILED after {load_s:.0f}s (server exited or never healthy)")
         _kill(proc)
         result = {
@@ -384,6 +386,7 @@ def run(ngl: int, order: str, minutes: float) -> dict:
     # --- Sustained generation + sampling loop ---------------------------------------
     samples: list[Sample] = []
     decodes: list[DecodeResult] = []
+    mem_method = "phys_footprint"
     root = proc.pid
     end_t = time.perf_counter() + minutes * 60
     next_sample = time.perf_counter()
@@ -405,6 +408,7 @@ def run(ngl: int, order: str, minutes: float) -> dict:
         now = time.perf_counter()
         if now >= next_sample:
             c = tree_counters(root)
+            mem_method = c["mem_method"]
             samples.append(
                 Sample(
                     t=now,
@@ -427,16 +431,17 @@ def run(ngl: int, order: str, minutes: float) -> dict:
     vm_after = get_vm_stat()
     vmd = vm_stat_delta(vm_before, vm_after)
 
-    result = _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_info, buffers, load_s)
+    result = _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_info, buffers, load_s, mem_method)
     _kill(proc)
-    _log(ngl, order, minutes, result)
+    _log(ngl, order, minutes, result, mem_method=mem_method)
     return result
 
 
-def _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_info, buffers, load_s) -> dict:
+def _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_info, buffers, load_s, mem_method) -> dict:
     phys = [s.phys_gb for s in samples] or [0.0]
     phys_sorted = sorted(phys)
-    p95 = phys_sorted[min(len(phys_sorted) - 1, int(0.95 * (len(phys_sorted) - 1)))]
+    # nearest-rank p95 (correct for small sample counts, e.g. the 5-min B2 run).
+    p95 = phys_sorted[min(math.ceil(0.95 * len(phys_sorted)) - 1, len(phys_sorted) - 1)]
     phys_max = max(phys)
     phys_med = statistics.median(phys)
 
@@ -496,6 +501,7 @@ def _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_
         "gates": gates,
         "ballast": ballast_info,
         "buffer_sizes": buffers,
+        "mem_method": mem_method,
     }
 
 
@@ -506,9 +512,12 @@ def _kill(proc: subprocess.Popen):
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
+    fh = getattr(proc, "_log_fh", None)
+    if fh is not None and not fh.closed:
+        fh.close()
 
 
-def _log(ngl, order, minutes, result, status="completed"):
+def _log(ngl, order, minutes, result, status="completed", mem_method="phys_footprint"):
     log_experiment(
         experiment_name=f"h9_e1b_coresidency_ngl{ngl}_{order}",
         phase="E1b-B",
@@ -536,7 +545,7 @@ def _log(ngl, order, minutes, result, status="completed"):
             "cache_hit_rate": None,  # reason: no GGUF page-residency API; see diskread/pageins
             "perplexity": None,  # reason: quality gated via 20-case tool-call harness
         },
-        results={**result, "mem_method": "phys_footprint"},
+        results={"mem_method": mem_method, **result},
         status=status,
     )
 
@@ -551,7 +560,9 @@ def main():
     r.add_argument("--minutes", type=float, default=30.0)
     args = ap.parse_args()
 
-    if not os.path.exists(MODEL_PATH):
+    # Only `run` needs the GGUF; `calibrate` has a __file__ fallback (verify the counter
+    # before the 18 GB download). (code-review: don't block calibrate.)
+    if args.cmd == "run" and not os.path.exists(MODEL_PATH):
         print(f"ERROR: GGUF not found at {MODEL_PATH}. Download first.", file=sys.stderr)
         sys.exit(2)
 
@@ -560,8 +571,7 @@ def main():
     elif args.cmd == "run":
         res = run(args.ngl, args.order, args.minutes)
         print("\n=== RESULT ===")
-        import json as _j
-        print(_j.dumps(res, indent=2, default=str))
+        print(json.dumps(res, indent=2, default=str))
 
 
 if __name__ == "__main__":
