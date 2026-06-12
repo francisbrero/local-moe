@@ -109,7 +109,20 @@ User chose "measure under contention." Under the dev machine's normal app load, 
 - The scripts are ready: `uv run python scripts/h9_e1_baseline.py --runtime engine` and
   `--runtime served --server-pid <pid>`; harness via `scripts/h9_e1_harness.py --runtime auto`.
 
+## Under-contention re-run attempt (user: "run anyway now")
+Re-attempted the engine tool harness at the user's request while Cursor+Chrome were still up.
+- **4th consecutive reproduction** of the swap-limited blocker. Launched at 9.8–16.6 GB free start;
+  in every attempt `mlx_lm.load()` never returned to usable state — worker pinned at 0–25% CPU,
+  `vm.swapusage` 16–19 GB, available collapsing to ~3.7 GB. No tool-call case results produced.
+- A transient 17.9 GB-free reading appeared right after killing a run, but starting a 16.5 GB
+  allocation immediately re-triggered swap (stale swapped pages from prior runs page back in and
+  compete). The free reading was not sustainable headroom.
+- Logged `tool_calls_under_contention` (status=blocked) to experiments.jsonl.
+- **Firm conclusion:** the model needs ~17 GB *genuinely* free — i.e. quit Cursor/Chrome, not a
+  transient reading. No code/runtime issue; purely host memory pressure.
+
 ## Next Steps
-1. Commit scripts + docs (WIP).
-2. Phase 4 code-review loop on the scripts.
-3. PR documenting: tooling built, footprint finding, swap-limited blocker, quiesced re-run needed.
+1. (DONE) Scripts committed, code-reviewed (2 rounds), PR #40 open.
+2. Perf + tool-call gates remain BLOCKED pending a quiesced machine (heavy apps actually quit).
+3. When RAM is genuinely free: `scripts/h9_e1_baseline.py --runtime engine` and
+   `scripts/h9_e1_harness.py --runtime auto` will fill in the numbers.
