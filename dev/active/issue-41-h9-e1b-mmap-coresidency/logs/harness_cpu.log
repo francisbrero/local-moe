@@ -1,0 +1,61 @@
+Running harness: runtime=served gate_tier=served
+  [email-1] semantic_pass=False tool=None
+  [email-2] semantic_pass=True tool=label_email
+  [email-3] semantic_pass=False tool=None
+  [email-4] semantic_pass=True tool=label_email
+  [email-5] semantic_pass=True tool=label_email
+  [email-6] semantic_pass=True tool=label_email
+  [cal-1] semantic_pass=True tool=lookup_calendar
+  [cal-2] semantic_pass=True tool=lookup_calendar
+  [cal-3] semantic_pass=True tool=lookup_calendar
+  [cal-4] semantic_pass=True tool=lookup_calendar
+  [slack-1] semantic_pass=True tool=post_slack
+  [slack-2] semantic_pass=True tool=post_slack
+  [slack-3] semantic_pass=True tool=post_slack
+  [slack-4] semantic_pass=True tool=post_slack
+  [sum-1] semantic_pass=True tool=None
+  [sum-2] semantic_pass=True tool=None
+  [sum-3] semantic_pass=True tool=None
+  [mixed-1] semantic_pass=True tool=send_email
+  [mixed-2] semantic_pass=True tool=create_event
+  [mixed-3] semantic_pass=True tool=create_event
+
+=== Tool-call harness summary ===
+{
+  "n_cases": 20,
+  "semantic_pass": 18,
+  "semantic_pass_rate": 0.9,
+  "structural_valid": 18,
+  "structural_valid_rate": 0.9,
+  "n_recovered_by_lenient": 0,
+  "gate_pass": true,
+  "by_category": {
+    "email_triage": {
+      "n": 6,
+      "semantic_pass": 4,
+      "rate": 0.6667
+    },
+    "calendar_lookup": {
+      "n": 4,
+      "semantic_pass": 4,
+      "rate": 1.0
+    },
+    "slack_post": {
+      "n": 4,
+      "semantic_pass": 4,
+      "rate": 1.0
+    },
+    "summarization_no_tool": {
+      "n": 3,
+      "semantic_pass": 3,
+      "rate": 1.0
+    },
+    "mixed_multiarg": {
+      "n": 3,
+      "semantic_pass": 3,
+      "rate": 1.0
+    }
+  },
+  "runtime": "served",
+  "gate_tier": "served"
+}

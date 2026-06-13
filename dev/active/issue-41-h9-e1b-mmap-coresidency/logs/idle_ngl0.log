@@ -1,0 +1,42 @@
+0.00.060.861 I log_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.060.863 I device_info:
+0.00.060.867 I   - MTL0    : Apple M4 Pro (18186 MiB, 18185 MiB free)
+0.00.060.868 I   - BLAS    : Accelerate (0 MiB, 0 MiB free)
+0.00.060.872 I   - CPU     : Apple M4 Pro (24576 MiB, 24576 MiB free)
+0.00.060.883 I system_info: n_threads = 8 (n_threads_batch = 8) / 12 | MTL : EMBED_LIBRARY = 1 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | LLAMAFILE = 1 | ACCELERATE = 1 | REPACK = 1 | 
+0.00.060.884 I srv  llama_server: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true
+0.00.060.949 I srv          init: using 11 threads for HTTP server
+0.00.061.183 I srv         start: binding port with default address family
+0.00.062.737 I srv  llama_server: loading model
+0.00.063.132 I srv    load_model: loading model 'models/gguf/Qwen3-30B-A3B-Q4_K_M.gguf'
+0.00.063.150 I common_init_result: fitting params to device memory ...
+0.00.063.150 I common_init_result: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)
+0.00.259.333 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.59.473.794 W llama_context: n_ctx_seq (8192) < n_ctx_train (40960) -- the full capacity of the model will not be utilized
+0.59.590.368 I common_init_from_params: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+1.01.728.530 I srv    load_model: initializing slots, n_slots = 4
+1.01.914.756 W common_speculative_init: no implementations specified for speculative decoding
+1.01.914.760 I slot   load_model: id  0 | task -1 | new slot, n_ctx = 8192
+1.01.914.766 I slot   load_model: id  1 | task -1 | new slot, n_ctx = 8192
+1.01.914.766 I slot   load_model: id  2 | task -1 | new slot, n_ctx = 8192
+1.01.914.766 I slot   load_model: id  3 | task -1 | new slot, n_ctx = 8192
+1.01.915.106 I srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+1.01.915.107 I srv    load_model: use `--cache-ram 0` to disable the prompt cache
+1.01.915.108 I srv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+1.01.915.109 I srv    load_model: context checkpoints enabled, max = 32, min spacing = 256
+1.01.915.159 I srv          init: idle slots will be saved to prompt cache and cleared upon starting a new task
+1.01.927.246 I init: chat template, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+'
+1.01.929.809 I srv          init: init: chat template, thinking = 1
+1.01.929.820 I srv  llama_server: model loaded
+1.01.929.826 I srv  llama_server: server is listening on http://127.0.0.1:8125
+1.01.929.830 I srv  update_slots: all slots are idle
+1.05.719.040 I srv    operator(): operator(): cleaning up before exit...

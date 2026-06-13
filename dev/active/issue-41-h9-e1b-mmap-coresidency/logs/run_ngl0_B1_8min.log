@@ -1,0 +1,65 @@
+[run] starting llama-server -ngl 0 (mmap on, ctx 8192)
+[run] server healthy after 66s
+[run] B1: allocating 8 GB ballast AFTER model load
+[run] sustained loop for 8.0 min, sampling every 30.0s
+  [34s] phys=17.98GB avail=5.64GB swap=12.4741796875GB diskread=45.22GB
+  [71s] phys=17.98GB avail=8.33GB swap=13.538271484375GB diskread=45.47GB
+  [108s] phys=17.98GB avail=5.67GB swap=12.8617578125GB diskread=45.47GB
+  [141s] phys=17.98GB avail=7.18GB swap=13.2616015625GB diskread=45.47GB
+  [173s] phys=17.98GB avail=7.07GB swap=12.980283203125GB diskread=45.47GB
+  [210s] phys=17.98GB avail=5.62GB swap=13.082216796875GB diskread=45.47GB
+  [242s] phys=17.98GB avail=6.82GB swap=13.050966796875GB diskread=45.47GB
+  [275s] phys=17.98GB avail=5.89GB swap=13.027529296875GB diskread=45.47GB
+  [306s] phys=17.98GB avail=5.59GB swap=13.0255078125GB diskread=45.47GB
+  [336s] phys=17.98GB avail=4.72GB swap=13.3696875GB diskread=45.47GB
+  [374s] phys=17.98GB avail=5.17GB swap=13.46484375GB diskread=45.47GB
+  [408s] phys=17.98GB avail=6.00GB swap=13.42126953125GB diskread=45.47GB
+  [443s] phys=17.98GB avail=6.56GB swap=13.66412109375GB diskread=45.47GB
+  [474s] phys=17.98GB avail=6.49GB swap=13.60162109375GB diskread=45.47GB
+  Logged: h9_e1b_coresidency_ngl0_B1 -> /Users/francis/Documents/MadKudu/local-moe/experiments.jsonl
+
+=== RESULT ===
+{
+  "verdict_perf_gates": "fail",
+  "note": "tool-call gate run separately via h9_e1_harness.py --runtime served",
+  "order": "B1",
+  "ngl": 0,
+  "minutes": 8.0,
+  "load_seconds": 66.2,
+  "samples": 14,
+  "decode_tok_s_median": null,
+  "ttft_p50_s": null,
+  "phys_footprint_gb": {
+    "median": 17.98,
+    "p95": 17.98,
+    "max": 17.98
+  },
+  "diskread_churn_mb_s": 0.0,
+  "pageout_mb_hr": 283.0,
+  "pagein_mb_total": 40805.94,
+  "swap_used_gb_last": 13.60162109375,
+  "avail_gb_last": 6.49,
+  "gates": {
+    "decode_tok_s>=12": false,
+    "ttft_p50_s<=10": false,
+    "pageout_mb_hr<200": false,
+    "phys_p95_and_max<=8": false,
+    "diskread_mb_s<50": true,
+    "tool_call>=90pct": null
+  },
+  "ballast": {
+    "ballast_cpu_gb": 4.0,
+    "ballast_mlx_gb": 4.0,
+    "ballast_total_gb": 8.0,
+    "avail_before_gb": 4.72,
+    "avail_after_gb": 0.26,
+    "avail_drop_gb": 4.45
+  },
+  "buffer_sizes": {
+    "metal_model_mib": null,
+    "cpu_model_mib": null,
+    "kv_mib": null,
+    "raw": []
+  },
+  "mem_method": "phys_footprint"
+}
