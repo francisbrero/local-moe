@@ -22,9 +22,9 @@
 
 ## Phase 4 — Code review
 - [x] Commit WIP; code-review R1 (fixed requests dep, calibrate guard, p95, fd, mem_method, lints)
-- [ ] Final-state code-review loop
+- [x] Final-state code-review R2 (converged, material_findings:false; ballast/guard fixes applied)
 
 ## Phase 5 — Finalize
 - [x] Final findings + verdict + E3 implication in context.md
-- [ ] PR with Fixes #41, review round counts
-- [ ] On merge: move dev-docs to dev/completed/
+- [x] PR #42 with Fixes #41, review round counts (6 plan / 2 code)
+- [ ] On merge: move dev-docs to dev/completed/ (after #40 + #42 merge)
