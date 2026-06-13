@@ -149,4 +149,10 @@ The verdict is **mixed, not a clean PASS or FAIL**, so E3 should proceed with a 
 
 ## Review Stats (final)
 - Plan review rounds: 6 (converged). Findings addressed: ~17 high/medium across R1–R6.
-- Code review rounds: <to fill after Phase 4>.
+- Code review rounds: 2 (converged at R2 = material_findings:false).
+  - R1 (WIP): requests dep undeclared; calibrate guard blocked by GGUF check; p95 not nearest-rank;
+    server-log fd leak; mem_method hardcoded not propagated; unused imports/dead var. All fixed.
+  - R2 (final state): material_findings:false. Fixed anyway (cheap correctness): ballast pages now
+    distinct (XOR with page index) so Zswap can't dedup/compress in the 0–30s window; `is not None`
+    guards on float metrics (0.0 no longer dropped/masked); Popen-failure fd close.
+- Total findings addressed: plan ~17, code 6 (R1) + 4 (R2, non-material but fixed).

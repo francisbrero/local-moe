@@ -169,11 +169,17 @@ class Ballast:
 
     def allocate(self) -> dict:
         before = get_available_memory_gb()
-        # CPU ballast: allocate then overwrite with a non-compressible random pattern.
+        # CPU ballast: allocate then overwrite so EVERY page has DISTINCT, non-compressible
+        # content. A single repeated random page would let macOS Zswap dedup/compress the
+        # ballast in the 0-30 s window before the first retouch() diverges the pages, under-
+        # stating pressure in the earliest samples (code-review). XOR the random base page
+        # with the page index so each page is unique with negligible overhead.
         self.cpu = allocate_cpu_ballast(BALLAST_CPU_GB)  # touched 0xFF per page
-        rnd = os.urandom(self._page)
+        rnd = bytearray(os.urandom(self._page))
         for off in range(0, len(self.cpu), self._page):
-            self.cpu[off : off + len(rnd)] = rnd[: max(0, min(len(rnd), len(self.cpu) - off))]
+            tag = (off // self._page) & 0xFF
+            n = min(self._page, len(self.cpu) - off)
+            self.cpu[off : off + n] = bytes(b ^ tag for b in rnd[:n])
         self.mlx = allocate_mlx_ballast(BALLAST_MLX_GB)  # Metal, force-eval'd
         after = get_available_memory_gb()
         return {
@@ -215,7 +221,11 @@ def start_server(ngl: int, log_path: Path) -> subprocess.Popen:
         # mmap ENABLED (default): do NOT pass --no-mmap or --mlock.
     ]
     f = open(log_path, "w")
-    proc = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT)
+    try:
+        proc = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT)
+    except BaseException:
+        f.close()  # don't leak the handle if Popen fails (e.g. binary missing)
+        raise
     proc._log_fh = f  # keep a ref; closed in _kill() to avoid a dangling fd / ResourceWarning
     return proc
 
@@ -445,8 +455,8 @@ def _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_
     phys_max = max(phys)
     phys_med = statistics.median(phys)
 
-    tps = [d.decode_tok_s for d in decodes if d.decode_tok_s]
-    ttfts = [d.ttft_ms for d in decodes if d.ttft_ms]
+    tps = [d.decode_tok_s for d in decodes if d.decode_tok_s is not None]
+    ttfts = [d.ttft_ms for d in decodes if d.ttft_ms is not None]
     decode_med = statistics.median(tps) if tps else None
     ttft_p50_s = (statistics.median(ttfts) / 1000.0) if ttfts else None
 
@@ -486,8 +496,8 @@ def _compute_gates(ngl, order, minutes, samples, decodes, elapsed, vmd, ballast_
         "minutes": minutes,
         "load_seconds": round(load_s, 1),
         "samples": len(samples),
-        "decode_tok_s_median": round(decode_med, 2) if decode_med else None,
-        "ttft_p50_s": round(ttft_p50_s, 2) if ttft_p50_s else None,
+        "decode_tok_s_median": round(decode_med, 2) if decode_med is not None else None,
+        "ttft_p50_s": round(ttft_p50_s, 2) if ttft_p50_s is not None else None,
         "phys_footprint_gb": {
             "median": round(phys_med, 2),
             "p95": round(p95, 2),
