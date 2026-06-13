@@ -12,17 +12,19 @@
 
 ## Phase 3 — Implementation
 - [x] Write `scripts/h9_e1b_coresidency.py` (calibrate + run B1/B2; reuses E1 collector/SSE)
-- [~] Phase A: download Q4_K_M GGUF (running, bg); repo=Qwen/Qwen3-30B-A3B-GGUF, 18.56 GB, sha 0d003f66
-- [ ] Phase A: launch llama-server (mmap, --jinja, --metrics); tool-call smoke test; idle footprint
-- [ ] Phase A: measure -ngl 999 AND CPU/partial config idle footprint (the crux)
-- [ ] Phase B: 30-min co-residency under 8 GB ballast, sample phys_footprint + vm_stat every 30s
-- [ ] Phase C: run 20-case harness (served, port 8124); record success rate
-- [ ] Phase D: compute gates, log to experiments.jsonl (phys_footprint), write verdict
+- [x] Phase A: download Q4_K_M GGUF; sha 0d003f66 verified; disk-churn calibration PASS
+- [x] Phase A: launch llama-server (mmap, --jinja); idle footprint measured
+- [x] Phase A: idle ngl-0 = 17.91 GB phys_footprint BUT 4.01 GB resident (the crux finding)
+- [~] Phase B: 8-min ngl-0 B1 under 8 GB ballast (clean, 14 samples); decode swap-limited.
+      30-min/B2 deferred — needs quiesced machine (host contention, see context.md)
+- [x] Phase C: 20-case harness on CPU = 18/20 (90%) PASS
+- [x] Phase D: gates computed, logged to experiments.jsonl, verdict written
 
 ## Phase 4 — Code review
-- [ ] Commit WIP; code-review loop (max 10 rounds), fix material findings
+- [x] Commit WIP; code-review R1 (fixed requests dep, calibrate guard, p95, fd, mem_method, lints)
+- [ ] Final-state code-review loop
 
 ## Phase 5 — Finalize
-- [ ] Final findings + review stats in context.md
+- [x] Final findings + verdict + E3 implication in context.md
 - [ ] PR with Fixes #41, review round counts
 - [ ] On merge: move dev-docs to dev/completed/

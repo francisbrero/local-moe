@@ -137,6 +137,53 @@ laptop" — it is **"largest model that fits in the headroom the user isn't alre
   where MLX-wired thrashed? This is the cheapest decisive probe and would tell us whether 30B is viable
   concurrent at all (currently scoped only as a sub-bullet of E4). Worth promoting?
 
+## E1b Findings (June 2026, issue #41) — the mmap co-residency probe
+
+E1b ran Qwen3-30B-A3B **Q4_K_M GGUF** (Qwen/Qwen3-30B-A3B-GGUF, 18.56 GB, sha 0d003f66…) via
+`llama-server` (mmap default, `--jinja`), under an exactly-8 GB fixed ballast. It answers the
+promoted question — *does llama.cpp mmap hold the 30B at low resident set and survive co-residency
+where MLX-wired thrashed?* — and the answer is **a nuanced "the memory story changes, the speed
+verdict doesn't (on this contended machine)."**
+
+### The crux result: mmap resident set is ~4 GB, but phys_footprint reports ~18 GB
+Idle, `-ngl 0` (CPU/mmap), no ballast:
+- **phys_footprint = 17.91 GB** but **`ri_resident_size` = 4.01 GB.**
+
+mmap works exactly as hoped — the OS keeps only ~4 GB of weights RAM-resident and pages the rest
+from the file. **But `phys_footprint` over-counts mmap**: it charges the full ~18 GB of file-backed
+pages to the process even though the OS can evict them under pressure. This is the **exact mirror of
+E1**, where RSS *under*-counted MLX's wired memory (0.37 GB reported vs 16.55 GB real).
+
+> **Methodology consequence:** phys_footprint is authoritative for *wired* memory (MLX) but
+> *over*-states *mmap* memory. For the mmap concurrent tier, **`ri_resident_size` is the truer
+> working-set metric.** By resident_size (~4 GB) the 30B **fits** the ≤ 8 GB concurrent budget;
+> by phys_footprint (~18 GB) it does not. The E1b plan-review flagged this page-cache blind spot
+> in advance.
+
+### What was measured (all in experiments.jsonl)
+- **Tool-call quality: 18/20 = 90.0%** (CPU/ngl-0, quiesced). Calendar/Slack/summarization/mixed
+  all 100%; email triage 4/6. Qwen3-30B-A3B via llama.cpp is a competent tool-caller — **passes**.
+- **Disk-read churn 0 MB/s steady-state** — once mmap'd in, weights are not re-faulted from SSD
+  (the page cache holds them); the churn gate **passes** (per-process `ri_diskio_bytesread`,
+  calibrated cold=64 MB vs warm=0 MB).
+- **Decode under 8 GB ballast: not demonstrable** — CPU 30B under the dev machine's residual swap
+  (13–28 GB) produced no tokens in the request window; pageouts 283 MB/hr (> 200). **Same host
+  contention that blocked E1** — the machine could not be fully quiesced this session.
+- **Full Metal offload (`-ngl 999`) is GPU-OOM-blocked even idle:** the 30B (~18 GB) + 8 GB prompt
+  cache + KV exceeds the M4 Pro's **18186 MiB GPU budget** (`kIOGPUCommandBufferCallbackError
+  OutOfMemory`). The usable Mac config is **partial offload** with the prompt cache trimmed.
+
+### Verdict & implication for E3
+- **Categorical win over E1:** llama.cpp mmap **loads** the 30B under contention; MLX could not.
+- **Memory thesis: supported by the right metric.** Resident set ~4 GB fits the concurrent budget;
+  the 30B is NOT off-limits the way MLX-wired 16.5 GB was.
+- **Speed thesis: inconclusive** on this contended, 18 GB-GPU machine. The one missing number is
+  partial-offload decode tok/s on a *genuinely quiesced* machine (scripts ready).
+- **Recommendation:** 30B-via-llama.cpp-mmap is a **viable-but-unproven concurrent candidate**
+  (memory ✓ by resident_size, quality ✓ at 90%, speed TBD). Keep ≤ 4B as the safe concurrent
+  default until a clean partial-offload decode number clears ≥ 12 tok/s. E3 should benchmark
+  partial-offload, not full Metal offload, and gate memory on **resident_size**, not phys_footprint.
+
 ## Plan Revision (post-E1 researcher response, 2026-06-12)
 
 The E1 reframe is accepted. The binding constraint for a daily local agent is **headroom the user isn't already using**, not total RAM. Answers to the three open questions, then the revised plan.
