@@ -219,20 +219,34 @@ def direct_kv_bytes(prompt_cache) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Match mlx_lm.generate_step's default chunked prefill so quantization is interleaved between
+# chunks exactly as the production path does (code-review R1): a single 15K-token forward pass
+# would (a) apply quantization only once at the very end, and (b) allocate far larger prefill
+# scratch than the chunked path the daily workload actually uses.
+PREFILL_STEP_SIZE = 512
+
+
 def _prefill_and_quantize(model, prompt_ids, kv_bits: Optional[int]):
-    """Prefill prompt into a fresh prompt_cache; quantize it for kv4. Returns the cache."""
+    """Prefill prompt into a fresh prompt_cache using chunked prefill (mlx_lm semantics);
+    quantize the cache progressively between chunks for kv4. Returns (cache, last_logits)."""
     import mlx.core as mx
     from mlx_lm.models.cache import make_prompt_cache
     from mlx_lm.generate import maybe_quantize_kv_cache
 
     cache = make_prompt_cache(model)
-    x = mx.array(prompt_ids)[None]
-    logits = model(x, cache=cache)
-    mx.eval(logits)
-    # Quantize after prefill (offset now == prompt_len >= quantized_kv_start=0).
-    maybe_quantize_kv_cache(cache, QUANTIZED_KV_START, KV_GROUP_SIZE, kv_bits)
-    mx.eval([c.state for c in cache])
-    last_logits = logits[:, -1, :]
+    ids = mx.array(prompt_ids)
+    n = ids.shape[0]
+    last_logits = None
+    i = 0
+    while i < n:
+        chunk = ids[i:i + PREFILL_STEP_SIZE][None]
+        logits = model(chunk, cache=cache)
+        # Interleave quantization between chunks (offset grows past quantized_kv_start=0).
+        maybe_quantize_kv_cache(cache, QUANTIZED_KV_START, KV_GROUP_SIZE, kv_bits)
+        mx.eval([c.state for c in cache])
+        i += PREFILL_STEP_SIZE
+        last_logits = logits[:, -1, :]
+    mx.eval(last_logits)
     return cache, last_logits
 
 
@@ -525,12 +539,12 @@ def cmd_run(args):
                     (SUMMARY_DIR / f"L{L}_s{s}_kv4.txt").write_text(r4["summary"])
 
             if r16 is not None:
-                samples_kv16.append({"seq": actual, "ppl": ppl16, **r16["timing"],
+                samples_kv16.append({"sample_idx": s, "seq": actual, "ppl": ppl16, **r16["timing"],
                                      "kv_direct_bytes": r16["kv_direct_bytes"],
                                      "kv_analytic_bytes": r16["kv_analytic_bytes"],
                                      "peak_gpu_mb": r16["peak_gpu_mb"]})
             if r4 is not None:
-                samples_kv4.append({"seq": actual, "ppl": ppl4, **r4["timing"],
+                samples_kv4.append({"sample_idx": s, "seq": actual, "ppl": ppl4, **r4["timing"],
                                     "kv_direct_bytes": r4["kv_direct_bytes"],
                                     "kv_analytic_bytes": r4["kv_analytic_bytes"],
                                     "peak_gpu_mb": r4["peak_gpu_mb"],
@@ -554,37 +568,47 @@ def _median(xs):
 
 
 def _aggregate_and_log(L, dims, kv16, kv4, kv16_skipped, kv4_skipped, pf16, pf4, env) -> dict:
-    seq_full = L + MAX_TOKENS
+    # Use the REALIZED median seq length (code-review R5): tokenizer round-trip can make the
+    # actual prompt differ from L by a few tokens, and the cache also holds MAX_TOKENS decoded.
+    def realized_seq(samples):
+        s = _median([x["seq"] for x in samples])
+        return int(s) + MAX_TOKENS if s is not None else (L + MAX_TOKENS)
+    seq16, seq4 = realized_seq(kv16), realized_seq(kv4)
 
-    def kv_gb(samples, kvb):
+    def kv_gb(samples, kvb, seq):
         if samples:
             return _median([s["kv_direct_bytes"] for s in samples]) / (1024**3)
-        return analytic_kv_bytes(dims, seq_full, kvb) / (1024**3)
+        return analytic_kv_bytes(dims, seq, kvb) / (1024**3)
 
-    kv16_gb = kv_gb(kv16, None)
-    kv4_gb = kv_gb(kv4, 4)
+    kv16_gb = kv_gb(kv16, None, seq16)
+    kv4_gb = kv_gb(kv4, 4, seq4)
 
-    # .nbytes vs analytic hard validity gate (per config, when measured).
-    def validity(samples, kvb):
+    # .nbytes vs analytic hard validity gate (per config, when measured) — analytic at the
+    # realized seq so the comparison is apples-to-apples.
+    def validity(samples, kvb, seq):
         if not samples:
             return {"measured": False}
         direct = _median([s["kv_direct_bytes"] for s in samples])
-        ana = analytic_kv_bytes(dims, seq_full, kvb)
+        ana = analytic_kv_bytes(dims, seq, kvb)
         diverge = abs(direct - ana) / ana
         return {"measured": True, "direct_bytes": int(direct), "analytic_bytes": int(ana),
                 "divergence": round(diverge, 4), "valid": diverge <= NBYTES_ANALYTIC_TOL}
-    v16, v4 = validity(kv16, None), validity(kv4, 4)
+    v16, v4 = validity(kv16, None, seq16), validity(kv4, 4, seq4)
     memory_inconclusive = (v16.get("measured") and not v16["valid"]) or \
                           (v4.get("measured") and not v4["valid"])
 
-    per_gb_16 = seq_full / kv16_gb
-    per_gb_4 = seq_full / kv4_gb
+    # per-GB ratio uses each config's own realized seq (they're near-identical by construction).
+    per_gb_16 = seq16 / kv16_gb
+    per_gb_4 = seq4 / kv4_gb
     per_gb_ratio = per_gb_4 / per_gb_16
 
-    # Quality gate: summary-only ΔPPL on paired samples.
+    # Quality gate: summary-only ΔPPL on samples PAIRED BY sample_idx (code-review R4 — a
+    # mid-sweep failure in one config must not silently mis-pair the positional lists).
+    kv4_by_idx = {s["sample_idx"]: s for s in kv4}
     deltas = []
-    for a, b in zip(kv16, kv4):
-        if a["ppl"] and b["ppl"]:
+    for a in kv16:
+        b = kv4_by_idx.get(a["sample_idx"])
+        if b and a["ppl"] and b["ppl"]:
             deltas.append(abs(b["ppl"] - a["ppl"]) / a["ppl"])
     mean_dppl = statistics.mean(deltas) if deltas else None
     rouges = [s.get("rouge_l_vs_kv16") for s in kv4 if s.get("rouge_l_vs_kv16") is not None]
@@ -598,7 +622,10 @@ def _aggregate_and_log(L, dims, kv16, kv4, kv16_skipped, kv4_skipped, pf16, pf4,
     # Gate evaluation (plan.md verdict classes).
     quality_pass = (mean_dppl is not None and mean_dppl <= PPL_GATE_REL)
     quality_status = "pass" if quality_pass else ("unverified" if kv16_skipped else "fail")
-    pergb_pass = per_gb_ratio >= PERGB_GATE
+    # per-GB is meaningless (pure analytic, nothing ran) when BOTH configs were skipped —
+    # surface None so _final_verdict doesn't read a spurious pass (code-review R3).
+    both_skipped = kv16_skipped and kv4_skipped
+    pergb_pass = None if both_skipped else (per_gb_ratio >= PERGB_GATE)
     no_oom = not kv4_skipped
     kv16_oom_path = kv16_skipped and not kv4_skipped  # PASS-with-asterisk case
 
@@ -621,7 +648,7 @@ def _aggregate_and_log(L, dims, kv16, kv4, kv16_skipped, kv4_skipped, pf16, pf4,
         "model": MODEL, "runtime": "mlx_lm", "tier": "engine_offhours",
         "context_length": L, "kv_group_size": KV_GROUP_SIZE,
         "quantized_kv_start": QUANTIZED_KV_START, "max_tokens": MAX_TOKENS,
-        "n_samples": len(kv16) or len(kv4),
+        "n_kv16_samples": len(kv16), "n_kv4_samples": len(kv4),
         "n_layers": dims.n_layers, "n_kv_heads": dims.n_kv_heads, "head_dim": dims.head_dim,
         "preflight_kv16": pf16, "preflight_kv4": pf4,
     }
