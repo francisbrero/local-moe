@@ -141,26 +141,43 @@ def _make_transcript(sample_idx: int, min_chars: int) -> str:
     return "".join(parts)
 
 
+def _templated(tokenizer, transcript: str) -> tuple[str, int]:
+    msgs = [{"role": "user", "content": SUMMARIZE_INSTRUCTION + transcript}]
+    templated = tokenizer.apply_chat_template(
+        msgs, add_generation_prompt=True, tokenize=False
+    )
+    return templated, len(tokenizer.encode(templated))
+
+
 def build_transcript_prompt(tokenizer, target_tokens: int, sample_idx: int) -> tuple[str, int]:
-    """Build a chat-templated summarization prompt of ~exactly target_tokens, deterministically."""
-    # Reserve headroom for the chat template + instruction; grow transcript until total >= target.
-    chars = target_tokens * 3  # rough chars/token seed
-    while True:
-        transcript = _make_transcript(sample_idx, chars)
-        content = SUMMARIZE_INSTRUCTION + transcript
-        msgs = [{"role": "user", "content": content}]
-        templated = tokenizer.apply_chat_template(
-            msgs, add_generation_prompt=True, tokenize=False
-        )
-        toks = tokenizer.encode(templated)
-        if len(toks) >= target_tokens:
-            break
+    """Build a chat-templated summarization prompt of ~target_tokens, deterministically.
+
+    CRITICAL (code-review R2-P1): we trim the TRANSCRIPT BODY and re-apply the chat template
+    each time, so the assistant generation suffix (the "now answer" turn) is ALWAYS preserved
+    at the end. Slicing the already-templated token sequence would strip that suffix and the
+    model would just continue an unfinished user turn instead of summarizing — silently
+    invalidating both the generated summary and the PPL gate.
+    """
+    # Grow the transcript body until the FULL templated prompt reaches the target.
+    chars = target_tokens * 3
+    transcript = _make_transcript(sample_idx, chars)
+    _, ntok = _templated(tokenizer, transcript)
+    while ntok < target_tokens:
         chars = int(chars * 1.3) + 256
-    # Trim transcript body down to hit target exactly (slice tokens, re-decode).
-    toks = toks[:target_tokens]
-    text = tokenizer.decode(toks)
-    actual = len(tokenizer.encode(text))
-    return text, actual
+        transcript = _make_transcript(sample_idx, chars)
+        _, ntok = _templated(tokenizer, transcript)
+
+    # Binary-search the transcript length (in chars) so the templated total lands near target.
+    lo, hi = 0, len(transcript)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        _, n = _templated(tokenizer, transcript[:mid])
+        if n <= target_tokens:
+            lo = mid
+        else:
+            hi = mid - 1
+    templated, actual = _templated(tokenizer, transcript[:lo])
+    return templated, actual
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +642,14 @@ def _aggregate_and_log(L, dims, kv16, kv4, kv16_skipped, kv4_skipped, pf16, pf4,
     # per-GB is meaningless (pure analytic, nothing ran) when BOTH configs were skipped —
     # surface None so _final_verdict doesn't read a spurious pass (code-review R3).
     both_skipped = kv16_skipped and kv4_skipped
-    pergb_pass = None if both_skipped else (per_gb_ratio >= PERGB_GATE)
+    if both_skipped:
+        pergb_pass = None
+    elif memory_inconclusive:
+        # .nbytes vs analytic diverged > tolerance — the memory measurement is invalid, so the
+        # per-GB gate cannot PASS on it (code-review R2-P2).
+        pergb_pass = False
+    else:
+        pergb_pass = per_gb_ratio >= PERGB_GATE
     no_oom = not kv4_skipped
     kv16_oom_path = kv16_skipped and not kv4_skipped  # PASS-with-asterisk case
 
