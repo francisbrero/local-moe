@@ -705,11 +705,15 @@ def _final_verdict(per_length, env):
     pergbs = {L: per_length[L]["per_gb_pass"] for L in lengths}
     all_quality = all(q == "pass" for q in quals.values())
     all_pergb = all(pergbs.values())
+    # For the asterisk path, a None per-GB (both configs skipped at a length) shouldn't drag
+    # an otherwise-clean result down to PARTIAL (code-review R3-low) — judge on the lengths
+    # that actually produced a per-GB number.
+    pergb_where_measured = all(v for v in pergbs.values() if v is not None)
     any_unverified = any(q == "unverified" for q in quals.values())
 
     if all_quality and all_pergb:
         overall = "PASS"
-    elif all_pergb and any_unverified and not any(q == "fail" for q in quals.values()):
+    elif pergb_where_measured and any_unverified and not any(q == "fail" for q in quals.values()):
         overall = "PASS_WITH_ASTERISK"  # e.g. 15K kv16 OOM, quality proven through 12K
     elif quals.get(lengths[0]) == "pass" and quals.get(lengths[1] if len(lengths) > 1 else lengths[0]) == "pass":
         overall = "PARTIAL"
