@@ -21,10 +21,11 @@
 - [x] Arm (b): documented as deferred/out-of-scope (E1b host blocker)
 
 ## Phase 3 — Code review
-- [ ] Commit WIP
-- [ ] Automated code-review loop
+- [x] Commit WIP
+- [x] Automated code-review loop (3 rounds; converged; 8 findings incl. 1 high fixed)
 
 ## Phase 4 — Finalize
-- [ ] Update context.md (findings + review stats)
-- [ ] Commit `Fixes #36`
-- [ ] `gh pr create`
+- [x] Update context.md (findings + review stats)
+- [x] Commits reference #36
+- [x] `gh pr create`
+- [ ] Run the sweep on a quiesced machine; record measured verdict (blocked: 10.9 GB free)
