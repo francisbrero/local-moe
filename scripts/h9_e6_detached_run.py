@@ -518,7 +518,11 @@ def _run_e2_llama_arm(kv_type: str, port: int, corpus: list[dict]) -> dict:
             "--jinja", "--metrics",
         ]
         f = open(server_log, "w")
-        proc = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT)
+        try:
+            proc = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT)
+        except BaseException:
+            f.close()  # don't leak the handle if Popen fails (e.g. binary missing)
+            raise
         proc._log_fh = f
         print(f"[E2-llama:{kv_type}] starting llama-server -fa -ctk {kv_type} on {port}")
         if not e1b.wait_healthy(base_url, proc, timeout_s=900):
@@ -526,8 +530,8 @@ def _run_e2_llama_arm(kv_type: str, port: int, corpus: list[dict]) -> dict:
                     "buffer_sizes": e1b.parse_buffer_sizes(server_log)}
         ballast_info = ballast.allocate()
 
-        quality_probe = _probe_input_logprobs(base_url, corpus[0] and
-                                               Path(corpus[0]["path"]).read_text()[:2000])
+        probe_text = Path(corpus[0]["path"]).read_text()[:2000] if corpus else ""
+        quality_probe = _probe_input_logprobs(base_url, probe_text)
 
         # Summarization workload over the fixed corpus; sample memory each doc.
         samples = []

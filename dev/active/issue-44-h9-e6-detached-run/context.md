@@ -54,7 +54,20 @@ enforces detachment.
   - R2: E1b unified-mem budget gate, unavailable llama-perplexity, empty corpus, abs+rel pageout, mlx_touched, doc step
   - R3: input-token logprob coverage, distinct ports, execution-order clarity, start_server copy-not-call
   - R4: clean
-- Code review rounds: 0 (pending)
+- Code review rounds: 2 (converged, MATERIAL_FINDINGS:false)
+  - R1 (3 medium, all fixed): E4 tool-call parse/gate, tokenizer-only corpus (no 30B weights), E2-llama honors lowmem gate
+  - R2 (2 low, fixed anyway): dead corpus[0] guard, Popen file-handle leak in _run_e2_llama_arm
+- Total findings addressed: 9 plan + 5 code = 14
+
+## FINAL STATUS
+Deliverables complete:
+- `scripts/h9_e6_detached_run.py` — bundled E1b+E2+E4 detached run, lint-clean, self-tested.
+- `scripts/h9_e6.plist` — optional launchd overnight template.
+Verified from this session: preflight aborts (exit 2) at ~4 GB free, logs h9_e6_preflight aborted.
+Real measured numbers are pending the user's DETACHED run (quit IDE/Chrome, run from bare
+terminal). This is the designed outcome — the whole point of #44 is that numbers cannot be
+obtained from the contended orchestrating session. Follow-ups (#36/#37/#38/PR#43 updates, moving
+dev-docs to completed/) happen once the detached run produces numbers.
 
 ## Next steps
 1. Plan-review loop.
