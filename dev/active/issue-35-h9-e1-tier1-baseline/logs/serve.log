@@ -1,0 +1,61 @@
+INFO:vllm_mlx.utils.download:Downloading model mlx-community/Qwen3-30B-A3B-4bit (attempt 1/3, timeout=300s)
+INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/mlx-community/Qwen3-30B-A3B-4bit/revision/main "HTTP/1.1 200 OK"
+============================================================
+SECURITY CONFIGURATION
+============================================================
+  Authentication: DISABLED - Use --api-key to enable
+  Rate limiting: DISABLED - Use --rate-limit to enable
+  Request timeout: 300.0s
+  Metrics: ENABLED (/metrics, unauthenticated)
+  Remote code loading: DISABLED (default)
+  Idle auto-unload: DISABLED
+  Tool calling: ENABLED (parser: hermes)
+  Reasoning: Use --reasoning-parser to enable
+  Audio upload limit: 25 MiB, TTS input limit: 4096 chars
+============================================================
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files: 100%|██████████| 12/12 [00:00<00:00, 126144.48it/s]
+INFO:vllm_mlx.utils.download:Model downloaded successfully to /Users/francis/.cache/huggingface/hub/models--mlx-community--Qwen3-30B-A3B-4bit/snapshots/d388dead1515f5e085ef7a0431dd8fadf0886c57
+INFO:vllm_mlx.server:Loading model with SimpleEngine: mlx-community/Qwen3-30B-A3B-4bit
+INFO:vllm_mlx.models.llm:Loading model: mlx-community/Qwen3-30B-A3B-4bit
+INFO:vllm_mlx.models.llm:Qwen3 detected: setting eos_token to <|im_end|>
+INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/mlx-community/Qwen3-30B-A3B-4bit/revision/main "HTTP/1.1 200 OK"
+Loading model: mlx-community/Qwen3-30B-A3B-4bit
+Default max tokens: 32768
+Max request tokens: 32768
+Mode: Simple (maximum throughput)
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files: 100%|██████████| 12/12 [00:00<00:00, 103138.62it/s]
+INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/mlx-community/Qwen3-30B-A3B-4bit/revision/main "HTTP/1.1 200 OK"
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files: 100%|██████████| 12/12 [00:00<00:00, 91015.64it/s]
+INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/mlx-community/Qwen3-30B-A3B-4bit/revision/main "HTTP/1.1 200 OK"
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files: 100%|██████████| 12/12 [00:00<00:00, 152059.36it/s]
+INFO:vllm_mlx.models.llm:Model loaded successfully: mlx-community/Qwen3-30B-A3B-4bit
+INFO:vllm_mlx.engine.simple:SimpleEngine loaded: mlx-community/Qwen3-30B-A3B-4bit (MLLM=False)
+INFO:vllm_mlx.server:LLM model loaded (simple mode): mlx-community/Qwen3-30B-A3B-4bit
+INFO:vllm_mlx.server:Native tool format enabled for parser: hermes
+INFO:vllm_mlx.server:Default max tokens: 32768
+INFO:vllm_mlx.server:Max request tokens: 32768
+INFO:     Started server process [69927]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8123 (Press CTRL+C to quit)
+WARNING:vllm_mlx.server:SECURITY WARNING: Server running without API key authentication. Anyone can access the API. Use --api-key to enable authentication.
+INFO:vllm_mlx.server:[REQUEST] POST /v1/chat/completions stream=True model='mlx-community/Qwen3-30B-A3B-4bit' max_tokens=32 temp=0.0 top_p=None top_k=None min_p=None presence_penalty=None repetition_penalty=None msgs=1 roles=['user'] total_chars=50 tools=0 response_format=None
+INFO:vllm_mlx.server:[REQUEST] last user message preview: Write a short paragraph about distributed systems.
+INFO:vllm_mlx.server:[disconnect_guard] START poll=0.5s heartbeat=5.0s timeout=300s
+Starting server at http://127.0.0.1:8123
+INFO:     127.0.0.1:60162 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:vllm_mlx.server:[disconnect_guard] first chunk arrived, elapsed=0.0s
+INFO:vllm_mlx.server:Initialized tool call parser: hermes
+INFO:     Shutting down
+WARNING:vllm_mlx.server:[disconnect_guard] TIMEOUT after 300s, 2 chunks, 0 heartbeats, elapsed=394.2s
+INFO:vllm_mlx.server:[disconnect_guard] CLEANUP done, 2 chunks, 0 heartbeats, elapsed=394.2s
+[WARNING] Generating with a model that requires 16378 MB which is close to the maximum recommended size of 18186 MB. This can be slow. See the documentation for possible work-arounds: https://github.com/ml-explore/mlx-lm/tree/main#large-models
+INFO:     127.0.0.1:61526 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     Waiting for connections to close. (CTRL+C to force quit)
+INFO:     Waiting for application shutdown.
+INFO:vllm_mlx.engine.simple:SimpleEngine stopped
+INFO:vllm_mlx.server:Engine stopped
+INFO:     Application shutdown complete.
+INFO:     Finished server process [69927]
+/Users/francis/.local/share/uv/python/cpython-3.13.2-macos-aarch64-none/lib/python3.13/multiprocessing/resource_tracker.py:277: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-u96bv9l9'}
+  warnings.warn(
