@@ -1,0 +1,95 @@
+0.00.076.579 I log_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.076.583 I device_info:
+0.00.076.588 I   - MTL0    : Apple M4 Pro (18186 MiB, 18185 MiB free)
+0.00.076.589 I   - BLAS    : Accelerate (0 MiB, 0 MiB free)
+0.00.076.594 I   - CPU     : Apple M4 Pro (24576 MiB, 24576 MiB free)
+0.00.076.619 I system_info: n_threads = 8 (n_threads_batch = 8) / 12 | MTL : EMBED_LIBRARY = 1 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | LLAMAFILE = 1 | ACCELERATE = 1 | REPACK = 1 | 
+0.00.077.842 I srv          init: using 11 threads for HTTP server
+0.00.078.703 I srv         start: binding port with default address family
+0.00.079.406 I srv  llama_server: loading model
+0.00.079.704 I srv    load_model: loading model '/Users/francis/Documents/MadKudu/local-moe/models/gguf/Qwen3-30B-A3B-Q4_K_M.gguf'
+0.00.080.693 I common_init_result: fitting params to device memory ...
+0.00.080.695 I common_init_result: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)
+0.00.229.954 W common_fit_params: failed to fit params to free device memory: n_gpu_layers already set by user to 999, abort
+0.00.304.026 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.38.116.888 W llama_context: n_ctx_seq (8192) < n_ctx_train (40960) -- the full capacity of the model will not be utilized
+0.54.095.671 I common_init_from_params: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+0.58.607.376 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.607.401 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.609.748 I srv    load_model: initializing slots, n_slots = 1
+0.58.614.821 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.827 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.828 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.828 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.830 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.830 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.831 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.831 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.831 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.831 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.850 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.851 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.852 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.614.852 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.614.852 E ggml_metal_graph_compute: backend is in error state from a previous command buffer failure - recreate the backend to recover
+0.58.614.853 E graph_compute: ggml_backend_sched_graph_compute_async failed with error -1
+0.58.614.853 E process_ubatch: failed to compute graph, compute status: -1
+0.58.614.854 W decode: removing memory module entries for seq_id = 0, pos = [0, +inf)
+0.58.614.860 E llama_decode: failed to decode, ret = -3
+0.58.614.860 E common_context_can_seq_rm: llama_decode() failed: -3
+0.58.618.558 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+0.58.618.559 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+0.58.618.562 W srv    load_model: speculative decoding not supported by this context
+0.58.620.724 I slot   load_model: id  0 | task -1 | new slot, n_ctx = 8192
+0.58.621.447 I srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+0.58.621.450 I srv    load_model: use `--cache-ram 0` to disable the prompt cache
+0.58.621.450 I srv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+0.58.621.451 I srv    load_model: context checkpoints enabled, max = 32, min spacing = 256
+0.58.622.733 W srv          init: --cache-idle-slots requires --kv-unified, disabling
+0.58.678.659 I init: chat template, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+'
+0.58.681.368 I srv          init: init: chat template, thinking = 1
+0.58.683.279 I srv  llama_server: model loaded
+0.58.683.285 I srv  llama_server: server is listening on http://127.0.0.1:8124
+0.58.683.450 I srv  update_slots: all slots are idle
+1.52.256.163 I srv    operator(): operator(): cleaning up before exit...
+1.52.378.769 E ggml_metal_synchronize: error: command buffer 0 failed with status 5
+1.52.385.034 E error: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+Received second interrupt, terminating immediately.
+/Users/runner/work/inference-engine-llama.cpp/inference-engine-llama.cpp/llamacpp/native/vendor/llama.cpp/ggml/src/ggml-metal/ggml-metal-device.m:622: GGML_ASSERT([rsets->data count] == 0) failed
+WARNING: Using native backtrace. Set GGML_BACKTRACE_LLDB for more info.
+WARNING: GGML_BACKTRACE_LLDB may cause native MacOS Terminal.app to crash.
+See: https://github.com/ggml-org/llama.cpp/pull/17869
+0   libggml-base.0.13.1.dylib           0x00000001028d5380 ggml_print_backtrace + 276
+1   libggml-base.0.13.1.dylib           0x00000001028d556c ggml_abort + 156
+2   libggml-metal.0.13.1.dylib          0x0000000103242480 ggml_metal_device_init + 0
+3   libggml-metal.0.13.1.dylib          0x00000001032430b0 ggml_metal_device_free + 24
+4   libggml-metal.0.13.1.dylib          0x0000000103244af0 _ZNSt3__16vectorINS_10unique_ptrI17ggml_metal_device25ggml_metal_device_deleterEENS_9allocatorIS4_EEED1B8ne190102Ev + 72
+5   libsystem_c.dylib                   0x0000000193d0f42c __cxa_finalize_ranges + 480
+6   libsystem_c.dylib                   0x0000000193d0f1ec exit + 44
+7   libllama-server-impl.dylib          0x00000001034347b4 _ZL14signal_handleri + 116
+8   libsystem_platform.dylib            0x0000000193e65764 _sigtramp + 56
+9   libsystem_pthread.dylib             0x0000000193e58e3c _pthread_mutex_firstfit_lock_wait + 84
+10  libsystem_pthread.dylib             0x0000000193e56868 _pthread_mutex_firstfit_lock_slow + 220
+11  libggml-metal.0.13.1.dylib          0x0000000103244044 ggml_metal_buffer_free + 52
+12  libggml-base.0.13.1.dylib           0x00000001028edee4 ggml_backend_buffer_free + 32
+13  libggml-base.0.13.1.dylib           0x00000001028eb468 ggml_vbuffer_free + 32
+14  libggml-base.0.13.1.dylib           0x00000001028eb384 ggml_gallocr_free + 128
+15  libggml-base.0.13.1.dylib           0x00000001028f3330 ggml_backend_sched_free + 144
+16  libllama.0.0.1.dylib                0x0000000102b3fc2c _ZN13llama_contextD2Ev + 452
+17  libllama.0.0.1.dylib                0x0000000102b48224 llama_free + 16
+18  libllama-common.0.0.1.dylib         0x0000000102e58c30 _ZN18common_init_result4implD2Ev + 188
+19  libllama-common.0.0.1.dylib         0x0000000102e566e4 _ZN18common_init_resultD1Ev + 36
+20  libllama-server-impl.dylib          0x0000000103507bf4 _ZN19server_context_impl7destroyEv + 84
+21  libllama-server-impl.dylib          0x000000010350893c _ZN19server_context_implD2Ev + 40
+22  libllama-server-impl.dylib          0x00000001034ed980 _ZN14server_contextD1Ev + 36
+23  libllama-server-impl.dylib          0x000000010343357c _Z12llama_serveriPPc + 16308
+24  dyld                                0x0000000193a91d54 start + 7184

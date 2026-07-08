@@ -1,0 +1,58 @@
+python3(21660) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+python3(28843) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+python3(31935) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+python3(32012) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+python3(32013) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+[run] starting llama-server -ngl 0 (mmap on, ctx 8192)
+[run] server healthy after 86s
+[run] B1: allocating 8 GB ballast AFTER model load
+[run] sustained loop for 3.0 min, sampling every 30.0s
+  [64s] phys=17.97GB avail=4.77GB swap=23.67876953125GB diskread=47.72GB
+  [247s] phys=17.97GB avail=4.36GB swap=28.01361328125GB diskread=55.38GB
+  Logged: h9_e1b_coresidency_ngl0_B1 -> /Users/francis/Documents/MadKudu/local-moe/experiments.jsonl
+
+=== RESULT ===
+{
+  "verdict_perf_gates": "fail",
+  "note": "tool-call gate run separately via h9_e1_harness.py --runtime served",
+  "order": "B1",
+  "ngl": 0,
+  "minutes": 3.0,
+  "load_seconds": 86.3,
+  "samples": 2,
+  "decode_tok_s_median": null,
+  "ttft_p50_s": null,
+  "phys_footprint_gb": {
+    "median": 17.97,
+    "p95": 17.97,
+    "max": 17.97
+  },
+  "diskread_churn_mb_s": 42.73,
+  "pageout_mb_hr": 1757.7,
+  "pagein_mb_total": 45654.67,
+  "swap_used_gb_last": 28.01361328125,
+  "avail_gb_last": 4.36,
+  "gates": {
+    "decode_tok_s>=12": false,
+    "ttft_p50_s<=10": false,
+    "pageout_mb_hr<200": false,
+    "phys_p95_and_max<=8": false,
+    "diskread_mb_s<50": true,
+    "tool_call>=90pct": null
+  },
+  "ballast": {
+    "ballast_cpu_gb": 4.0,
+    "ballast_mlx_gb": 4.0,
+    "ballast_total_gb": 8.0,
+    "avail_before_gb": 3.89,
+    "avail_after_gb": 2.57,
+    "avail_drop_gb": 1.32
+  },
+  "buffer_sizes": {
+    "metal_model_mib": null,
+    "cpu_model_mib": null,
+    "kv_mib": null,
+    "raw": []
+  },
+  "mem_method": "phys_footprint"
+}
