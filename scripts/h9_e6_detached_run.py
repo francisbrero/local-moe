@@ -198,7 +198,9 @@ def phase_e4() -> dict:
          "--runtime", "engine", "--out", str(tool_out)],
         LOGDIR / "e4_toolcall.log",
     )
-    tool_summary = _read_json(tool_out)
+    # h9_e1_harness --out writes {"summary": {...}, "cases": [...]}; the rate is nested.
+    tool_doc = _read_json(tool_out)
+    tool_rate = ((tool_doc or {}).get("summary") or {}).get("semantic_pass_rate")
 
     result = {
         "ran_first": True,
@@ -207,12 +209,13 @@ def phase_e4() -> dict:
         "perf_subprocess_rc": perf_rc,
         "perf_log": str(perf_out),
         "toolcall_subprocess_rc": tool_rc,
-        "toolcall_semantic_pass_rate": (tool_summary or {}).get("semantic_pass_rate"),
+        "toolcall_semantic_pass_rate": tool_rate,
         "note": "decode/prefill/phys_footprint recorded by h9_e1_baseline (phase perf_engine); "
                 "this record consolidates + adds the tool-call rate. Gates: decode>=20, "
                 "prefill>=300@8k, tool>=90%, phys<=21GB (see h9_e1_baseline record for numbers).",
     }
-    status = "completed" if perf_rc == 0 else "subprocess_error"
+    # E4 requires BOTH the perf number and the tool-call number to count as producing numbers.
+    status = "completed" if (perf_rc == 0 and tool_rate is not None) else "subprocess_error"
     log_experiment("h9_e6_e4", "h9_e6", {"runtime": "engine"}, result, status=status,
                    env=get_environment_info())
     return {"status": status, **result}
@@ -445,12 +448,15 @@ def phase_e2_mlx() -> dict:
 def _build_e2_corpus(n_docs: int = 3, target_tokens: int = 12000) -> list[dict]:
     """Deterministic fixed corpus (pinned sample_idx) saved + SHA256-logged so both llama.cpp
     arms score identical inputs and the comparison is reproducible without a prior E2 run.
-    Uses a tokenizer-only load to size prompts; no MLX weights are loaded."""
+    Uses a tokenizer-only load to size prompts; no MLX weights are loaded (avoids materializing
+    the full 30B just before the llama.cpp+ballast arm, which would OOM)."""
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
     import h9_e2_kv_workload as e2
-    from mlx_lm import load
+    from h9_e1_baseline import _load_tokenizer_only  # downloads tokenizer files only, no weights
 
-    _, tokenizer = load(e2.MODEL)  # tokenizer needed; weights load is unavoidable via mlx_lm.load
+    tokenizer = _load_tokenizer_only()
+    if tokenizer is None:
+        raise RuntimeError("tokenizer-only load failed; cannot build E2 corpus without weights")
     corpus = []
     for i in range(n_docs):
         prompt, ntok = e2.build_transcript_prompt(tokenizer, target_tokens, sample_idx=i)
@@ -561,15 +567,17 @@ def _run_e2_llama_arm(kv_type: str, port: int, corpus: list[dict]) -> dict:
         gc.collect()
 
 
-def phase_e2_llama() -> dict:
+def phase_e2_llama(force: bool = False) -> dict:
     """Arm 2 (NEW): llama.cpp -ctk q8_0 vs -ctk f16 baseline, each under 8 GB ballast.
     Quality via input-token logprob probe (expected unavailable -> None); pageout gated
     absolute (<200 MB/hr) AND relative (q8_0 <= f16 + 200 MB/hr)."""
-    corpus = _build_e2_corpus()
-    # Free the tokenizer/mlx load done for corpus sizing before launching llama-server arms.
-    global _mlx_touched
-    _mlx_touched = True
+    corpus = _build_e2_corpus()  # tokenizer-only; no MLX weights materialized
     cd = cooldown_and_gate(MIN_FREE_GB - 4.0, "e2-llama-arms")  # 8 GB ballast needs ~15 GB free
+    if not cd["ok"] and not force:
+        result = {"status": "skipped_lowmem", "cooldown": cd, "corpus": corpus}
+        log_experiment("h9_e6_e2_llamacpp", "h9_e6", {"arm": "llamacpp_q8_0_vs_f16"},
+                       result, status="skipped_lowmem", env=get_environment_info())
+        return result
 
     f16 = _run_e2_llama_arm("f16", PORT_E2_F16, corpus)
     time.sleep(COOLDOWN_S)  # let the f16 server + ballast release before the q8_0 arm
@@ -692,7 +700,7 @@ def main():
 
     # Phase B Arm 2 (E2 llama.cpp).
     if "e2llama" not in args.skip:
-        summary["phases"]["e2llama"] = phase_e2_llama()
+        summary["phases"]["e2llama"] = phase_e2_llama(force=args.force)
 
     # Phase D — overall verdict: did every arm produce >=1 number?
     produced = {k: v.get("status") for k, v in summary["phases"].items()}
