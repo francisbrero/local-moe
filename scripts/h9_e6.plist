@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  h9_e6.plist — OPTIONAL launchd template to run the E6 bundled measurement overnight.
+
+  This is a TEMPLATE, not installed by default. The preflight (>=19 GB free) still gates the
+  run, so schedule it for a time when Cursor/Chrome are closed (e.g. 2 AM). If the machine is
+  not quiesced at fire time, the run aborts cleanly and logs an h9_e6_preflight `aborted` record.
+
+  To install:
+    cp scripts/h9_e6.plist ~/Library/LaunchAgents/com.local-moe.h9-e6.plist
+    launchctl load ~/Library/LaunchAgents/com.local-moe.h9-e6.plist
+  To remove:
+    launchctl unload ~/Library/LaunchAgents/com.local-moe.h9-e6.plist
+    rm ~/Library/LaunchAgents/com.local-moe.h9-e6.plist
+
+  Adjust the absolute paths (uv location, repo path) to match your machine. Find uv with:
+    which uv
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local-moe.h9-e6</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>cd /Users/francis/Documents/MadKudu/local-moe &amp;&amp; /opt/homebrew/bin/uv run python scripts/h9_e6_detached_run.py 2>&amp;1 | tee dev/active/issue-44-h9-e6-detached-run/logs/e6_run.log</string>
+    </array>
+
+    <!-- Fire once at 02:00 local time. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/francis/Documents/MadKudu/local-moe/dev/active/issue-44-h9-e6-detached-run/logs/e6_launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/francis/Documents/MadKudu/local-moe/dev/active/issue-44-h9-e6-detached-run/logs/e6_launchd.err</string>
+</dict>
+</plist>
