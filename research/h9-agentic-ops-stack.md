@@ -184,7 +184,50 @@ E1**, where RSS *under*-counted MLX's wired memory (0.37 GB reported vs 16.55 GB
   default until a clean partial-offload decode number clears ≥ 12 tok/s. E3 should benchmark
   partial-offload, not full Metal offload, and gate memory on **resident_size**, not phys_footprint.
 
-## Plan Revision (post-E1 researcher response, 2026-06-12)
+## E2 Co-residency Note (June 2026, issue #36 / PR #43) — quantifying the headroom wall
+
+While setting up E2 (KV-quant at workload context), we tried to launch the off-hours MLX arm
+on the **actual working dev machine** and hit the E1 wall again — but this time we measured
+the memory-reclamation levers directly, which sharpens the "headroom, not capacity" thesis
+into operational numbers. Worth recording because it's the constraint every interactive H9
+experiment runs into, and it changes *how* we schedule the off-hours runs.
+
+### The arithmetic that can't be tuned away
+On 24 GB with the user's normal session live (Cursor ~4 GB across its 3 processes, the
+Claude Code agent + its Python child ~1.7 GB, Chrome, openclaw-gateway, etc.):
+- Free/available memory hovered at **9.5–10.6 GB**.
+- MLX-wired 30B needs **~18 GB** (16.55 GB weights wired + KV + scratch).
+- Gap ≈ **7–8 GB**. This is not a tuning problem — `16.55 GB wired + ~6 GB un-quittable
+  working set > 24 GB`. It is the E1 finding restated as an inequality.
+
+### What the reclamation levers actually buy (measured, not assumed)
+- **Trimming Chrome extensions** (disabled a redundant ad-blocker + Grammarly/Loom):
+  Chrome RSS 5.9 → 4.6 GB (**−1.3 GB**), but `available` moved 9.5 → 10.0 GB (**+0.5 GB**).
+  The OS quietly re-absorbed most of the freed pages. App-RSS trimming is largely a mirage
+  for clearing headroom under existing pressure.
+- **`sudo purge`** (flush compressor + inactive/file-backed pages): `available` 10.0 → 10.6 GB
+  (**+0.6 GB**); compressor 2.7 → 2.1 GB. The compressor was holding *needed* pages, not
+  stale junk, so it freed little. purge is not a substitute for closing apps.
+- **The un-measured ~4 GB**: `used` (13 GB) exceeds the sum of quittable app RSS (~11 GB). The
+  remainder is **compressor-occupied (~2 GB) + wired kernel/GPU**, none of it reclaimable while
+  the working set is live. A deep swap history (34M swapouts, 3.2 GB swap in use) confirms the
+  machine has been under sustained pressure.
+- **The biggest single lever is the one we can't pull mid-session: quit Cursor (~4 GB) and
+  run from a bare terminal** — because the Claude Code session itself runs *inside* Cursor's
+  integrated terminal, so the agent driving the experiment is part of the competing working
+  set it's trying to make room for. This is the practical reason the off-hours arm must be run
+  detached, not from the dev session.
+
+### Operational consequence (folds into the standing methodology)
+The off-hours/batch tier is not just "machine idle" as a soft preference — it is a **hard
+launch precondition: the orchestrating IDE/agent session must itself be closed**, and the run
+launched from a standalone terminal (or scheduled overnight). On this machine, no combination
+of extension-trimming + `purge` closes the 7–8 GB gap while Cursor + the agent are live; only
+quitting them does. E2's driver (`scripts/h9_e2_kv_workload.py`) encodes this defensively —
+its two-stage preflight aborts with a clear message rather than thrash (the E1 failure mode)
+when free RAM is below the weights+KV+scratch budget. **No measured E2 numbers were obtainable
+from the live dev session; the sweep is pending a detached/quiesced launch.** (See
+[h9-machine-contention-blocker] in agent memory.)
 
 The E1 reframe is accepted. The binding constraint for a daily local agent is **headroom the user isn't already using**, not total RAM. Answers to the three open questions, then the revised plan.
 
